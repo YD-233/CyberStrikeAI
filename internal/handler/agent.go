@@ -1717,6 +1717,8 @@ func (h *AgentHandler) AgentLoopStream(c *gin.Context) {
 func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 	var req struct {
 		ConversationID string `json:"conversationId" binding:"required"`
+		Reason         string `json:"reason,omitempty"`
+		ContinueAfter  bool   `json:"continueAfter,omitempty"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1724,7 +1726,23 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 		return
 	}
 
-	ok, err := h.tasks.CancelTask(req.ConversationID, ErrTaskCancelled)
+	if req.ContinueAfter && strings.TrimSpace(req.Reason) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "continueAfter 为 true 时必须提供非空的 reason（中断说明）"})
+		return
+	}
+
+	var cause error = ErrTaskCancelled
+	msg := "已提交取消请求，任务将在当前步骤完成后停止。"
+	if req.ContinueAfter {
+		if !h.tasks.SetInterruptContinueReason(req.ConversationID, req.Reason) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "未找到正在执行的任务，无法提交中断说明"})
+			return
+		}
+		cause = ErrUserInterruptContinue
+		msg = "已提交中断说明，当前步骤结束后将写入对话并继续迭代。"
+	}
+
+	ok, err := h.tasks.CancelTask(req.ConversationID, cause)
 	if err != nil {
 		h.logger.Error("取消任务失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1737,9 +1755,11 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":         "cancelling",
-		"conversationId": req.ConversationID,
-		"message":        "已提交取消请求，任务将在当前步骤完成后停止。",
+		"status":           "cancelling",
+		"conversationId":   req.ConversationID,
+		"message":          msg,
+		"continueAfter":    req.ContinueAfter,
+		"interruptWithNote": req.ContinueAfter,
 	})
 }
 

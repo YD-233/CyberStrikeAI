@@ -43,8 +43,11 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 	var sseWriteMu sync.Mutex
 	var ssePublishConversationID string
 	sendEvent := func(eventType, message string, data interface{}) {
-		if eventType == "error" && baseCtx != nil && errors.Is(context.Cause(baseCtx), ErrTaskCancelled) {
-			return
+		if eventType == "error" && baseCtx != nil {
+			cause := context.Cause(baseCtx)
+			if errors.Is(cause, ErrTaskCancelled) || errors.Is(cause, ErrUserInterruptContinue) {
+				return
+			}
 		}
 		ev := StreamEvent{Type: eventType, Message: message, Data: data}
 		b, errMarshal := json.Marshal(ev)
@@ -114,33 +117,10 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 	}
 
 	var cancelWithCause context.CancelCauseFunc
-	baseCtx, cancelWithCause = context.WithCancelCause(context.Background())
-	taskCtx, timeoutCancel := context.WithTimeout(baseCtx, 600*time.Minute)
-	defer timeoutCancel()
-	defer cancelWithCause(nil)
-	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
-	taskCtx = multiagent.WithHITLToolInterceptor(taskCtx, func(ctx context.Context, toolName, arguments string) (string, error) {
-		return h.interceptHITLForEinoTool(ctx, cancelWithCause, conversationID, assistantMessageID, sendEvent, toolName, arguments)
-	})
-
-	if _, err := h.tasks.StartTask(conversationID, req.Message, cancelWithCause); err != nil {
-		var errorMsg string
-		if errors.Is(err, ErrTaskAlreadyRunning) {
-			errorMsg = "⚠️ 当前会话已有任务正在执行中，请等待当前任务完成或点击「停止任务」后再尝试。"
-			sendEvent("error", errorMsg, map[string]interface{}{
-				"conversationId": conversationID,
-				"errorType":      "task_already_running",
-			})
-		} else {
-			errorMsg = "❌ 无法启动任务: " + err.Error()
-			sendEvent("error", errorMsg, nil)
-		}
-		if assistantMessageID != "" {
-			_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errorMsg, time.Now(), assistantMessageID)
-		}
-		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
-		return
-	}
+	firstRun := true
+	curFinalMessage := prep.FinalMessage
+	curHistory := prep.History
+	roleTools := prep.RoleTools
 
 	taskStatus := "completed"
 	defer h.tasks.FinishTask(conversationID, taskStatus)
@@ -161,22 +141,108 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 		return
 	}
 
-	result, runErr := multiagent.RunEinoSingleChatModelAgent(
-		taskCtx,
-		h.config,
-		&h.config.MultiAgent,
-		h.agent,
-		h.logger,
-		conversationID,
-		prep.FinalMessage,
-		prep.History,
-		prep.RoleTools,
-		progressCallback,
-	)
+	var result *multiagent.RunResult
+	var runErr error
 
-	if runErr != nil {
+	for {
+		baseCtx, cancelWithCause = context.WithCancelCause(context.Background())
+		taskCtx, timeoutCancel := context.WithTimeout(baseCtx, 600*time.Minute)
+
+		if firstRun {
+			if _, err := h.tasks.StartTask(conversationID, req.Message, cancelWithCause); err != nil {
+				var errorMsg string
+				if errors.Is(err, ErrTaskAlreadyRunning) {
+					errorMsg = "⚠️ 当前会话已有任务正在执行中，请等待当前任务完成或点击「停止任务」后再尝试。"
+					sendEvent("error", errorMsg, map[string]interface{}{
+						"conversationId": conversationID,
+						"errorType":      "task_already_running",
+					})
+				} else {
+					errorMsg = "❌ 无法启动任务: " + err.Error()
+					sendEvent("error", errorMsg, nil)
+				}
+				if assistantMessageID != "" {
+					_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errorMsg, time.Now(), assistantMessageID)
+				}
+				sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
+				timeoutCancel()
+				return
+			}
+			firstRun = false
+		} else {
+			if err := h.tasks.ResetTaskCancelForContinue(conversationID, cancelWithCause); err != nil {
+				h.logger.Error("续跑任务时重置 cancel 失败", zap.Error(err))
+				taskStatus = "failed"
+				sendEvent("error", err.Error(), nil)
+				sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
+				timeoutCancel()
+				return
+			}
+		}
+
+		progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
+		taskCtx = multiagent.WithHITLToolInterceptor(taskCtx, func(ctx context.Context, toolName, arguments string) (string, error) {
+			return h.interceptHITLForEinoTool(ctx, cancelWithCause, conversationID, assistantMessageID, sendEvent, toolName, arguments)
+		})
+
+		result, runErr = multiagent.RunEinoSingleChatModelAgent(
+			taskCtx,
+			h.config,
+			&h.config.MultiAgent,
+			h.agent,
+			h.logger,
+			conversationID,
+			curFinalMessage,
+			curHistory,
+			roleTools,
+			progressCallback,
+		)
+		timeoutCancel()
+
+		if runErr == nil {
+			break
+		}
+
 		h.persistEinoAgentTraceForResume(conversationID, result)
 		cause := context.Cause(baseCtx)
+		if errors.Is(cause, ErrUserInterruptContinue) {
+			reason := h.tasks.TakeInterruptContinueReason(conversationID)
+			prepNext, perr := h.prepareSessionAfterUserInterrupt(conversationID, assistantMessageID, reason, roleTools)
+			if perr != nil {
+				h.logger.Error("准备中断后续跑失败", zap.Error(perr))
+				taskStatus = "failed"
+				h.tasks.UpdateTaskStatus(conversationID, taskStatus)
+				errMsg := "中断后续跑失败: " + perr.Error()
+				if assistantMessageID != "" {
+					_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
+				}
+				sendEvent("error", errMsg, map[string]interface{}{
+					"conversationId": conversationID,
+					"messageId":      assistantMessageID,
+				})
+				sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
+				return
+			}
+			assistantMessageID = prepNext.AssistantMessageID
+			curFinalMessage = prepNext.FinalMessage
+			curHistory = prepNext.History
+			if prepNext.UserMessageID != "" {
+				sendEvent("message_saved", "", map[string]interface{}{
+					"conversationId": conversationID,
+					"userMessageId":  prepNext.UserMessageID,
+				})
+			}
+			sendEvent("user_interrupt_continue", reason, map[string]interface{}{
+				"conversationId": conversationID,
+				"reason":         reason,
+				"messageId":      assistantMessageID,
+			})
+			sendEvent("progress", "已接收中断说明，继续迭代...", map[string]interface{}{
+				"conversationId": conversationID,
+			})
+			continue
+		}
+
 		if errors.Is(cause, ErrTaskCancelled) {
 			taskStatus = "cancelled"
 			h.tasks.UpdateTaskStatus(conversationID, taskStatus)

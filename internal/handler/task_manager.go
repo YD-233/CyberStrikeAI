@@ -3,12 +3,16 @@ package handler
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
 
 // ErrTaskCancelled 用户取消任务的错误
 var ErrTaskCancelled = errors.New("agent task cancelled by user")
+
+// ErrUserInterruptContinue 用户在进度条上「中断并说明」：取消当前运行步骤，将说明写入对话并继续迭代（与 ErrTaskCancelled 区分）
+var ErrUserInterruptContinue = errors.New("user interrupt with continue")
 
 // ErrTaskAlreadyRunning 会话已有任务正在执行
 var ErrTaskAlreadyRunning = errors.New("agent task already running for conversation")
@@ -20,6 +24,9 @@ type AgentTask struct {
 	StartedAt      time.Time `json:"startedAt"`
 	Status         string    `json:"status"`
 	CancellingAt   time.Time `json:"-"` // 进入 cancelling 状态的时间，用于清理长时间卡住的任务
+
+	// InterruptContinueReason 由 /api/agent-loop/cancel 在 continueAfter 时写入，Run 返回后由 handler 取出并清空
+	InterruptContinueReason string `json:"-"`
 
 	cancel func(error)
 }
@@ -138,6 +145,49 @@ func (m *AgentTaskManager) StartTask(conversationID, message string, cancel cont
 
 	m.tasks[conversationID] = task
 	return task, nil
+}
+
+// SetInterruptContinueReason 在发起 ErrUserInterruptContinue 取消前写入用户说明（须任务仍存在）。
+func (m *AgentTaskManager) SetInterruptContinueReason(conversationID, reason string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[conversationID]
+	if !ok {
+		return false
+	}
+	task.InterruptContinueReason = strings.TrimSpace(reason)
+	return true
+}
+
+// TakeInterruptContinueReason 取出并清空用户中断说明。
+func (m *AgentTaskManager) TakeInterruptContinueReason(conversationID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[conversationID]
+	if !ok {
+		return ""
+	}
+	r := task.InterruptContinueReason
+	task.InterruptContinueReason = ""
+	return r
+}
+
+// ResetTaskCancelForContinue 在一次「中断并继续」后恢复任务为 running 并绑定新的 cancel（同一会话同一条 HTTP 流内续跑）。
+func (m *AgentTaskManager) ResetTaskCancelForContinue(conversationID string, cancel context.CancelCauseFunc) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[conversationID]
+	if !ok {
+		return errors.New("no active task")
+	}
+	task.cancel = func(err error) {
+		if cancel != nil {
+			cancel(err)
+		}
+	}
+	task.Status = "running"
+	task.CancellingAt = time.Time{}
+	return nil
 }
 
 // CancelTask 取消指定会话的任务。若任务已在取消中，仍返回 (true, nil) 以便接口幂等、前端不报错。

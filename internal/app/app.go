@@ -757,6 +757,7 @@ func setupRoutes(
 		// 监控
 		protected.GET("/monitor", monitorHandler.Monitor)
 		protected.GET("/monitor/execution/:id", monitorHandler.GetExecution)
+		protected.POST("/monitor/execution/:id/cancel", monitorHandler.CancelExecution)
 		protected.POST("/monitor/executions/names", monitorHandler.BatchGetToolNames)
 		protected.DELETE("/monitor/execution/:id", monitorHandler.DeleteExecution)
 		protected.DELETE("/monitor/executions", monitorHandler.DeleteExecutions)
