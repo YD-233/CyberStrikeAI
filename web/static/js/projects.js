@@ -695,7 +695,13 @@ async function linkFactToExistingVulnerability() {
     const items = data.Vulnerabilities || data.vulnerabilities || data.items || [];
     if (!items.length) return alert(tp('projects.noVulnerabilitiesInProject'));
     const lines = items.map((v, i) => `${i + 1}. [${v.severity}] ${v.title} (${v.id})`);
-    const pick = prompt(tpFmt('projects.promptLinkFactToVuln', `Enter index to link fact "${f.fact_key}":\n\n${lines.join('\n')}`, { factKey: f.fact_key, lines: lines.join('\n') }));
+    const pick = prompt(
+        tp('projects.promptLinkFactToVuln', {
+            factKey: f.fact_key,
+            lines: lines.join('\n'),
+            interpolation: { escapeValue: false },
+        }) || `Enter index to link fact "${f.fact_key}":\n\n${lines.join('\n')}`,
+    );
     if (pick == null || pick === '') return;
     const idx = parseInt(pick, 10) - 1;
     if (Number.isNaN(idx) || idx < 0 || idx >= items.length) return alert(tp('projects.invalidIndex'));
@@ -733,7 +739,11 @@ async function createVulnerabilityFromCurrentFact() {
         conversation_id: convId,
         project_id: currentProjectId,
         title: (f.summary || f.fact_key).slice(0, 200),
-        description: tpFmt('projects.generatedFromFact', `Generated from project fact ${f.fact_key}`, { factKey: f.fact_key }),
+        description:
+            tp('projects.generatedFromFact', {
+                factKey: f.fact_key,
+                interpolation: { escapeValue: false },
+            }) || `Generated from project fact ${f.fact_key}`,
         severity,
         status: 'open',
         type: f.category || 'finding',
@@ -764,7 +774,12 @@ async function createVulnerabilityFromCurrentFact() {
             related_vulnerability_id: vuln.id,
         }),
     });
-    alert(tpFmt('projects.createVulnerabilityAndLinkSuccess', `Created and linked vulnerability: ${vuln.title || vuln.id}`, { value: vuln.title || vuln.id }));
+    const createdVulnLabel = vuln.title || vuln.id;
+    const successMsg = tp('projects.createVulnerabilityAndLinkSuccess', {
+        value: createdVulnLabel,
+        interpolation: { escapeValue: false },
+    });
+    alert(successMsg || `Created and linked vulnerability: ${createdVulnLabel}`);
     closeFactDetailModal();
     loadProjectFacts();
     if (currentProjectTab === 'vulns') loadProjectVulnerabilities();
@@ -779,7 +794,12 @@ function inferSeverityFromFact(f) {
 }
 
 async function deprecateProjectFactByKey(factKey) {
-    if (!confirm(tpFmt('projects.confirmDeprecateFact', `Deprecate fact ${factKey}?`, { factKey }))) return;
+    if (!confirm(
+        tp('projects.confirmDeprecateFact', {
+            factKey,
+            interpolation: { escapeValue: false },
+        }) || `Deprecate fact ${factKey}?`,
+    )) return;
     const res = await apiFetch(`/api/projects/${currentProjectId}/facts/deprecate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -790,7 +810,12 @@ async function deprecateProjectFactByKey(factKey) {
 }
 
 async function restoreProjectFactByKey(factKey) {
-    if (!confirm(tpFmt('projects.confirmRestoreFact', `Restore fact ${factKey}? It will re-enter the board index with tentative status.`, { factKey }))) return;
+    if (!confirm(
+        tp('projects.confirmRestoreFact', {
+            factKey,
+            interpolation: { escapeValue: false },
+        }) || `Restore fact ${factKey}? It will re-enter the board index with tentative status.`,
+    )) return;
     const res = await apiFetch(`/api/projects/${currentProjectId}/facts/restore`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -883,11 +908,11 @@ async function viewFactsForVulnerability(vulnId) {
         return;
     }
     const pick = prompt(
-        tpFmt(
-            'projects.promptChooseFactByIndex',
-            `This vulnerability is linked to ${facts.length} facts. Enter index to view:\n${facts.map((f, i) => `${i + 1}. ${f.fact_key}`).join('\n')}`,
-            { count: facts.length, lines: facts.map((f, i) => `${i + 1}. ${f.fact_key}`).join('\n') },
-        ),
+        tp('projects.promptChooseFactByIndex', {
+            count: facts.length,
+            lines: facts.map((f, i) => `${i + 1}. ${f.fact_key}`).join('\n'),
+            interpolation: { escapeValue: false },
+        }) || `This vulnerability is linked to ${facts.length} facts. Enter index to view:\n${facts.map((f, i) => `${i + 1}. ${f.fact_key}`).join('\n')}`,
     );
     if (pick == null || pick === '') {
         loadProjectFacts();
