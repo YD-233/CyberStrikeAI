@@ -116,7 +116,7 @@ async function refreshDashboard() {
             fetchJson('/api/monitor/stats'),
             fetchJson('/api/knowledge/stats'),
             fetchJson('/api/skills/stats'),
-            fetchJson('/api/vulnerabilities?limit=5&page=1'),
+            fetchJson('/api/vulnerabilities?limit=10&page=1'),
             fetchJson('/api/roles'),
             fetchJson('/api/multi-agent/markdown-agents'),
             openVulnQuery('critical'),
@@ -139,7 +139,7 @@ async function refreshDashboard() {
             fetchJson('/api/c2/listeners'),
             fetchJson('/api/c2/sessions?limit=500'),
             fetchJson('/api/c2/tasks?page=1&page_size=1'),
-            fetchJson('/api/projects/dashboard-summary?fact_limit=5')
+            fetchJson('/api/projects/dashboard-summary?fact_limit=10')
         ]);
 
         // 如果在 await 期间 controller 已被 abort，说明又有新刷新启动了，丢弃本次结果
@@ -1117,7 +1117,7 @@ function renderRecentVulns(res) {
         empty.classList.remove('is-rich');
     }
 
-    list.slice(0, 5).forEach(function (v) {
+    list.slice(0, 10).forEach(function (v) {
         const sev = (v.severity || 'info').toLowerCase();
         const status = (v.status || 'open').toLowerCase();
         const item = document.createElement('a');
@@ -1211,6 +1211,18 @@ function factCategoryShortLabel(category) {
     return raw || 'note';
 }
 
+// 按 project_id（回退 project_name）稳定映射 8 种配色，同一项目跨刷新颜色一致
+function projectFactProjectTone(projectId, projectName) {
+    var key = String(projectId || projectName || '').trim();
+    if (!key) return 0;
+    var hash = 0;
+    for (var i = 0; i < key.length; i++) {
+        hash = ((hash << 5) - hash) + key.charCodeAt(i);
+        hash |= 0;
+    }
+    return Math.abs(hash) % 8;
+}
+
 function openProjectFactFromDashboard(projectId, factKey) {
     if (!projectId) return;
     if (typeof switchPage === 'function') {
@@ -1289,15 +1301,7 @@ function renderRecentFacts(res) {
         empty.classList.remove('is-rich');
     }
 
-    if (activeProjects > 0 || totalFacts > 0) {
-        var meta = document.createElement('div');
-        meta.className = 'dashboard-recent-facts-meta';
-        meta.textContent = dt('dashboard.factsAcrossProjects', { count: activeProjects, facts: totalFacts },
-            activeProjects + ' 个活跃项目 · ' + totalFacts + ' 条事实');
-        wrap.appendChild(meta);
-    }
-
-    list.slice(0, 5).forEach(function (f) {
+    list.slice(0, 10).forEach(function (f) {
         if (!f) return;
         var category = factCategoryShortLabel(f.category);
         var confidence = String(f.confidence || 'tentative').toLowerCase();
@@ -1319,17 +1323,17 @@ function renderRecentFacts(res) {
         var pinMark = '<span class="dashboard-recent-fact-pin' + (f.pinned ? ' is-pinned' : '') + '"' +
             (f.pinned ? (' title="' + esc(dt('projects.pinned', null, '置顶')) + '"') : '') +
             ' aria-hidden="true">' + (f.pinned ? '📌' : '') + '</span>';
+        var projectLabel = (f.project_name || '').trim() || dt('projects.defaultProjectName', null, '项目');
+        var factKeyLabel = (f.fact_key || '').trim() || '—';
+        var projectTone = projectFactProjectTone(pid, projectLabel);
+        var projectCol = '<span class="dashboard-recent-fact-project proj-tone-' + projectTone + '" title="' + esc(projectLabel) + '">' + esc(projectLabel) + '</span>';
         var categoryBadge = '<span class="dashboard-recent-fact-cat cat-' + esc(category.toLowerCase().replace(/[^a-z0-9_-]/g, '')) + '">' + esc(category) + '</span>';
         var confBadge = '<span class="dashboard-recent-fact-conf conf-' + esc(confidence) + '">' + esc(factConfidenceShortLabel(confidence)) + '</span>';
         var summary = '<span class="dashboard-recent-fact-summary" title="' + esc(f.summary || '') + '">' + esc(f.summary || dt('common.untitled', null, '无标题')) + '</span>';
-        // 勿用 i18n 插值拼接 fact_key：i18next 会把 / 转成 &#x2F; 导致乱码
-        var projectLabel = (f.project_name || '').trim() || dt('projects.defaultProjectName', null, '项目');
-        var factKeyLabel = (f.fact_key || '').trim() || '—';
-        var metaText = projectLabel + ' · ' + factKeyLabel;
-        var metaLine = '<span class="dashboard-recent-fact-meta" title="' + esc(metaText) + '">' + esc(metaText) + '</span>';
+        var factKeyCol = '<span class="dashboard-recent-fact-key" title="' + esc(factKeyLabel) + '">' + esc(factKeyLabel) + '</span>';
         var time = '<span class="dashboard-recent-fact-time">' + esc(timeAgoStr(f.updated_at)) + '</span>';
 
-        item.innerHTML = pinMark + categoryBadge + confBadge + summary + metaLine + time;
+        item.innerHTML = pinMark + categoryBadge + confBadge + summary + factKeyCol + projectCol + time;
         wrap.appendChild(item);
     });
 }
@@ -1428,7 +1432,7 @@ function renderVulnStatusPanel(byStatus, total) {
 //
 // bySeverityOpen: { critical, high, medium, low }（只统计 status=open 的漏洞；info 不计入）
 // totalOpen:      待处理漏洞总数（= critical + high + medium + low），仅用于"全无待处理 → safe"判断
-// recentVulnsRes: /api/vulnerabilities?limit=5 响应（用于"最近发现"时间，口径是全量，与处置状态无关）
+// recentVulnsRes: /api/vulnerabilities?limit=10 响应（用于"最近发现"时间，口径是全量，与处置状态无关）
 function renderSeverityInsights(bySeverityOpen, totalOpen, recentVulnsRes) {
     var riskBox = document.querySelector('.dashboard-severity-insight-risk');
     var levelEl = document.getElementById('dashboard-severity-risk-level');
