@@ -54,8 +54,12 @@ type ExternalMCPManager struct {
 	refreshWg    sync.WaitGroup            // 等待后台刷新goroutine完成
 	refreshing   atomic.Bool               // 防止 refreshToolCounts 并发堆积
 	mu           sync.RWMutex
-	runningCancels map[string]context.CancelFunc
-	abortUserNotes map[string]string
+	runningCancels    map[string]context.CancelFunc
+	abortUserNotes    map[string]string
+	reconnectMu       sync.Mutex
+	reconnecting      map[string]bool
+	reconnectLastTry  map[string]time.Time
+	reconnectAttempts map[string]int
 }
 
 // NewExternalMCPManager 创建外部MCP管理器
@@ -77,8 +81,11 @@ func NewExternalMCPManagerWithStorage(logger *zap.Logger, storage MonitorStorage
 		toolCache:         make(map[string]toolListCacheEntry),
 		listToolsInflight: make(map[string]*listToolsInflight),
 		stopRefresh:       make(chan struct{}),
-		runningCancels: make(map[string]context.CancelFunc),
-		abortUserNotes: make(map[string]string),
+		runningCancels:    make(map[string]context.CancelFunc),
+		abortUserNotes:    make(map[string]string),
+		reconnecting:      make(map[string]bool),
+		reconnectLastTry:  make(map[string]time.Time),
+		reconnectAttempts: make(map[string]int),
 	}
 	// 启动后台刷新工具数量的goroutine
 	manager.startToolCountRefresh()
@@ -145,6 +152,7 @@ func (m *ExternalMCPManager) RemoveConfig(name string) error {
 	}
 
 	delete(m.configs, name)
+	m.clearReconnectState(name)
 
 	// 清理工具数量缓存
 	m.toolCountsMu.Lock()
@@ -159,14 +167,23 @@ func (m *ExternalMCPManager) RemoveConfig(name string) error {
 	return nil
 }
 
-// StartClient 启动客户端
+// StartClient 启动客户端（用户手动启动；连接失败不自动重试）
 func (m *ExternalMCPManager) StartClient(name string) error {
+	return m.startClient(name, false)
+}
+
+// startClient 启动客户端。autoReconnect 为 true 时用于断连自愈：尊重停用状态，失败后按退避继续重试。
+func (m *ExternalMCPManager) startClient(name string, autoReconnect bool) error {
 	m.mu.Lock()
 	serverCfg, exists := m.configs[name]
 	m.mu.Unlock()
 
 	if !exists {
 		return fmt.Errorf("配置不存在: %s", name)
+	}
+
+	if autoReconnect && !m.isEnabled(serverCfg) {
+		return nil
 	}
 
 	// 检查是否已经有连接的客户端
@@ -178,11 +195,12 @@ func (m *ExternalMCPManager) StartClient(name string) error {
 		// 检查客户端是否已连接
 		if existingClient.IsConnected() {
 			// 客户端已连接，直接返回成功（目标状态已达成）
-			// 更新配置为启用（确保配置一致）
-			m.mu.Lock()
-			serverCfg.ExternalMCPEnable = true
-			m.configs[name] = serverCfg
-			m.mu.Unlock()
+			if !autoReconnect {
+				m.mu.Lock()
+				serverCfg.ExternalMCPEnable = true
+				m.configs[name] = serverCfg
+				m.mu.Unlock()
+			}
 			return nil
 		}
 		// 如果有客户端但未连接，先关闭
@@ -190,6 +208,16 @@ func (m *ExternalMCPManager) StartClient(name string) error {
 		m.mu.Lock()
 		delete(m.clients, name)
 		m.mu.Unlock()
+	}
+
+	if autoReconnect {
+		m.mu.RLock()
+		serverCfg, exists = m.configs[name]
+		enabled := exists && m.isEnabled(serverCfg)
+		m.mu.RUnlock()
+		if !enabled {
+			return nil
+		}
 	}
 
 	// 更新配置为启用
@@ -215,10 +243,11 @@ func (m *ExternalMCPManager) StartClient(name string) error {
 	m.mu.Unlock()
 
 	// 在后台异步进行实际连接
-	go func() {
+	go func(reconnect bool) {
 		if err := m.doConnect(name, serverCfg, client); err != nil {
 			m.logger.Error("连接外部MCP客户端失败",
 				zap.String("name", name),
+				zap.Bool("auto_reconnect", reconnect),
 				zap.Error(err),
 			)
 			// 连接失败，设置状态为error并保存错误信息
@@ -228,15 +257,19 @@ func (m *ExternalMCPManager) StartClient(name string) error {
 			m.mu.Unlock()
 			// 触发工具数量刷新（连接失败，工具数量应为0）
 			m.triggerToolCountRefresh()
+			if reconnect {
+				m.scheduleReconnectAfterFailure(name)
+			}
 		} else {
 			// 连接成功，清除错误信息
 			m.mu.Lock()
 			delete(m.errors, name)
 			m.mu.Unlock()
+			m.onClientConnected(name)
 			// 异步拉取工具列表（singleflight 去重，结果同时写入 toolCache 与 toolCounts）
 			go m.refreshToolCache(name, client)
 		}
-	}()
+	}(autoReconnect)
 
 	return nil
 }
@@ -272,6 +305,8 @@ func (m *ExternalMCPManager) StopClient(name string) error {
 	// 更新配置为禁用
 	serverCfg.ExternalMCPEnable = false
 	m.configs[name] = serverCfg
+
+	m.clearReconnectState(name)
 
 	return nil
 }
@@ -465,6 +500,7 @@ func (m *ExternalMCPManager) listToolsDeduped(ctx context.Context, name string, 
 	m.listToolsMu.Unlock()
 
 	if inflight.err != nil {
+		m.handleConnectionDead(name, client, inflight.err)
 		return nil, inflight.err
 	}
 	return cloneTools(inflight.tools), nil
@@ -579,6 +615,9 @@ func (m *ExternalMCPManager) CallTool(ctx context.Context, toolName string, args
 
 	// 调用工具
 	result, err := client.CallTool(execCtx, actualToolName, args)
+	if err != nil {
+		m.handleConnectionDead(mcpName, client, err)
+	}
 	cancelledWithUserNote := m.applyAbortUserNoteToCancelledToolResult(executionID, &result, &err)
 
 	// 更新执行记录
@@ -980,14 +1019,7 @@ func (m *ExternalMCPManager) refreshToolCounts() {
 			cancel()
 
 			if err != nil {
-				errStr := err.Error()
-				if strings.Contains(errStr, "EOF") || strings.Contains(errStr, "client is closing") {
-					m.logger.Warn("获取外部MCP工具数量失败（SSE 流已关闭或服务端未在流上返回 tools/list 响应）",
-						zap.String("name", n),
-						zap.String("hint", "若为 SSE 连接，请确认服务端保持 GET 流打开并按 MCP 规范以 event: message 推送 JSON-RPC 响应"),
-						zap.Error(err),
-					)
-				} else {
+				if !isConnectionDeadError(err) {
 					m.logger.Warn("获取外部MCP工具数量失败，请检查连接或服务端 tools/list",
 						zap.String("name", n),
 						zap.Error(err),
@@ -1181,6 +1213,8 @@ func (m *ExternalMCPManager) connectClient(name string, serverCfg config.Externa
 		zap.String("name", name),
 	)
 
+	m.onClientConnected(name)
+
 	// 连接成功，触发工具数量刷新和工具列表缓存刷新
 	m.triggerToolCountRefresh()
 	m.mu.RLock()
@@ -1265,6 +1299,7 @@ func (m *ExternalMCPManager) StopAll() {
 	for name, client := range m.clients {
 		client.Close()
 		delete(m.clients, name)
+		m.clearReconnectState(name)
 	}
 
 	// 清理所有工具数量缓存
