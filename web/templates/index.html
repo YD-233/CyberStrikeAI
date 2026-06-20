@@ -1498,6 +1498,13 @@
                         </aside>
                         <main class="projects-detail" id="projects-detail-main">
                             <div class="projects-detail-placeholder" id="projects-detail-placeholder">
+                                <div class="projects-placeholder-icon" aria-hidden="true">
+                                    <svg width="56" height="56" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                        <rect x="3" y="4" width="18" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/>
+                                        <path d="M3 9h18M8 4V9M16 4V9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                                        <path d="M8 14h8M8 17h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                                    </svg>
+                                </div>
                                 <h3 data-i18n="projects.selectOrCreateTitle">选择或创建项目</h3>
                                 <p data-i18n="projects.selectOrCreateHint">项目用于跨对话共享「事实黑板」：目标、环境、认证等信息会在绑定项目的对话中自动注入。</p>
                                 <button class="btn-primary" type="button" onclick="showNewProjectModal()" data-i18n="projects.createFirstProject">创建第一个项目</button>
@@ -1527,6 +1534,7 @@
                                 </header>
                                 <nav class="projects-tabs" role="tablist">
                                     <button type="button" id="project-tab-facts" class="projects-tab is-active" role="tab" onclick="switchProjectTab('facts')" data-i18n="projects.tabFacts">事实黑板</button>
+                                    <button type="button" id="project-tab-graph" class="projects-tab" role="tab" onclick="switchProjectTab('graph')" data-i18n="projects.tabGraph">攻击路径</button>
                                     <button type="button" id="project-tab-conversations" class="projects-tab" role="tab" onclick="switchProjectTab('conversations')" data-i18n="projects.tabConversations">关联对话</button>
                                     <button type="button" id="project-tab-vulns" class="projects-tab" role="tab" onclick="switchProjectTab('vulns')" data-i18n="projects.tabVulns">关联漏洞</button>
                                     <button type="button" id="project-tab-settings" class="projects-tab" role="tab" onclick="switchProjectTab('settings')" data-i18n="projects.tabSettings">设置</button>
@@ -1587,10 +1595,80 @@
                                     </div>
                                     <div class="projects-table-wrap">
                                         <table class="data-table data-table--projects">
-                                            <thead><tr><th>Key</th><th data-i18n="projects.category">分类</th><th data-i18n="projects.summary">摘要</th><th>Body</th><th data-i18n="projects.confidence">置信度</th><th data-i18n="projects.updated">更新</th><th class="col-actions" data-i18n="common.actions">操作</th></tr></thead>
+                                            <thead><tr><th>Key</th><th data-i18n="projects.category">分类</th><th data-i18n="projects.summary">摘要</th><th data-i18n="projects.linksColumn">关系</th><th>Body</th><th data-i18n="projects.confidence">置信度</th><th data-i18n="projects.updated">更新</th><th class="col-actions" data-i18n="common.actions">操作</th></tr></thead>
                                             <tbody id="project-facts-tbody"></tbody>
                                         </table>
                                     </div>
+                                </div>
+                                <div id="project-panel-graph" class="projects-panel projects-panel--graph" role="tabpanel" hidden>
+                                    <div class="projects-fact-toolbar projects-graph-toolbar">
+                                        <p class="projects-fact-toolbar-hint" role="note">
+                                            <svg class="projects-fact-toolbar-hint-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+                                                <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/>
+                                                <path d="M12 10v6M12 8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                            </svg>
+                                            <span data-i18n="projects.graphToolbarHint">攻击路径图：展示 target → finding → exploit 因果关系；虚线边表示待确认。点击节点查看详情。</span>
+                                        </p>
+                                        <div class="projects-fact-toolbar-filters projects-graph-toolbar-row">
+                                            <label class="projects-fact-filter-field">
+                                                <span class="projects-fact-filter-label" data-i18n="projects.graphView">视图</span>
+                                                <select id="project-graph-view" onchange="loadProjectFactGraph()">
+                                                    <option value="path" data-i18n="projects.graphViewPath">攻击路径</option>
+                                                    <option value="full" data-i18n="projects.graphViewFull">完整关系</option>
+                                                </select>
+                                            </label>
+                                            <label class="projects-fact-filter-field projects-fact-filter-field--search projects-graph-search-field">
+                                                <span class="sr-only" data-i18n="projects.graphSearchSr">搜索节点</span>
+                                                <svg class="projects-fact-search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+                                                    <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
+                                                    <path d="M20 20L16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                                </svg>
+                                                <input type="search" id="project-graph-search" placeholder="搜索节点…" oninput="filterProjectFactGraph()" autocomplete="off" data-i18n="projects.graphSearchPlaceholder" data-i18n-attr="placeholder">
+                                            </label>
+                                            <div class="projects-graph-actions" role="group" aria-label="Graph actions">
+                                                <button type="button" class="projects-graph-action-btn" onclick="loadProjectFactGraph()" title="刷新" data-i18n="projects.graphRefresh" data-i18n-attr="title">
+                                                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M21 3v6h-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                                    <span data-i18n="projects.graphRefresh">刷新</span>
+                                                </button>
+                                                <button type="button" class="projects-graph-action-btn" onclick="centerProjectFactGraph()" title="居中" data-i18n="projects.graphCenter" data-i18n-attr="title">
+                                                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                                                    <span data-i18n="projects.graphCenter">居中</span>
+                                                </button>
+                                                <button type="button" class="projects-graph-action-btn projects-graph-action-btn--connect" id="project-graph-connect-btn" onclick="toggleProjectFactGraphConnectMode()" data-i18n="projects.graphConnect">连边</button>
+                                            </div>
+                                        </div>
+                                        <div class="projects-graph-legend" aria-hidden="true">
+                                            <span class="projects-graph-legend-item"><i style="--legend-color:#4F46E5"></i><span data-i18n="projects.graphLegendDiscovered">discovered_on</span></span>
+                                            <span class="projects-graph-legend-item"><i style="--legend-color:#64748B"></i><span data-i18n="projects.graphLegendLeads">leads_to</span></span>
+                                            <span class="projects-graph-legend-item"><i style="--legend-color:#DC2626"></i><span data-i18n="projects.graphLegendExploits">exploits</span></span>
+                                            <span class="projects-graph-legend-item projects-graph-legend-item--dashed"><i style="--legend-color:#94A3B8"></i><span data-i18n="projects.graphLegendTentative">待确认</span></span>
+                                        </div>
+                                    </div>
+                                    <div class="project-fact-graph-layout">
+                                        <div id="project-fact-graph-container" class="project-fact-graph-container"></div>
+                                        <aside id="project-fact-graph-sidebar" class="project-fact-graph-sidebar" hidden>
+                                            <div class="project-fact-graph-sidebar-header">
+                                                <div class="project-fact-graph-sidebar-title-wrap">
+                                                    <span id="project-fact-graph-node-category" class="project-fact-graph-node-category"></span>
+                                                    <h4 id="project-fact-graph-node-title">—</h4>
+                                                </div>
+                                                <button type="button" class="project-fact-graph-sidebar-close" onclick="closeProjectFactGraphSidebar()" aria-label="关闭" data-i18n="common.close" data-i18n-attr="aria-label">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                                                </button>
+                                            </div>
+                                            <p id="project-fact-graph-node-meta" class="project-fact-graph-node-meta"></p>
+                                            <div id="project-fact-graph-edges-wrap" class="project-fact-graph-edges-wrap" hidden>
+                                                <h5 class="project-fact-graph-edges-title" data-i18n="projects.graphEdgesTitle">关系边</h5>
+                                                <p class="project-fact-graph-edges-hint" data-i18n="projects.graphEdgesHint">点击图中连线可定位；误连可在此删除。</p>
+                                                <div id="project-fact-graph-edges-list" class="project-fact-graph-edges-list"></div>
+                                            </div>
+                                            <div class="project-fact-graph-sidebar-actions">
+                                                <button type="button" class="btn-primary btn-small" id="project-fact-graph-detail-btn" onclick="openSelectedGraphFactDetail()" data-i18n="projects.details">详情</button>
+                                                <button type="button" class="btn-secondary btn-small" id="project-fact-graph-edit-btn" onclick="editSelectedGraphFact()" data-i18n="common.edit">编辑</button>
+                                            </div>
+                                        </aside>
+                                    </div>
+                                    <div id="project-fact-graph-stats" class="project-fact-graph-stats"></div>
                                 </div>
                                 <div id="project-panel-conversations" class="projects-panel" role="tabpanel" hidden>
                                     <div class="projects-panel-toolbar projects-panel-toolbar--hint">
@@ -4339,6 +4417,11 @@
                     <label for="fact-modal-related-vuln" data-i18n="projects.relatedVulnIdLabel">关联漏洞 ID</label>
                     <input type="text" id="fact-modal-related-vuln" class="form-input" placeholder="可选" data-i18n="projects.optional" data-i18n-attr="placeholder">
                 </div>
+                <div class="form-group">
+                    <label for="fact-modal-links" data-i18n="projects.factLinksLabel">关系边（出边）</label>
+                    <textarea id="fact-modal-links" class="form-input" rows="4" placeholder="discovered_on: target/primary_domain&#10;leads_to: finding/swagger" data-i18n="projects.factLinksPlaceholder" data-i18n-attr="placeholder"></textarea>
+                    <p class="projects-field-hint" data-i18n="projects.factLinksHint">每行一条：type: fact_key。常用 type：discovered_on、depends_on、leads_to、enables、exploits。保存时替换全部出边。</p>
+                </div>
             </div>
             <div class="projects-modal-footer">
                 <button class="btn-secondary" type="button" onclick="closeFactModal()" data-i18n="common.cancel">取消</button>
@@ -4396,6 +4479,7 @@
     <script src="/static/js/terminal.js"></script>
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/skills.js"></script>
+    <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js"></script>
     <script src="/static/js/vulnerability.js?v=12"></script>
     <script src="/static/js/webshell.js"></script>

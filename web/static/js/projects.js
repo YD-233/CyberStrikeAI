@@ -64,6 +64,8 @@ Host: ...
 ## 关联
 - related_vulnerability_id: <可选>
 - 依赖事实: <fact_key，如 auth/session_cookie>
+- 结构化出边（自动同步）:
+  - discovered_on: target/primary_domain
 
 ## 备注与不确定性
 <待验证假设、环境差异、绕过尝试记录>`;
@@ -730,20 +732,280 @@ async function selectProject(id) {
 
 function switchProjectTab(tab) {
     currentProjectTab = tab;
-    ['facts', 'conversations', 'vulns', 'settings'].forEach((t) => {
+    ['facts', 'graph', 'conversations', 'vulns', 'settings'].forEach((t) => {
         const btn = document.getElementById(`project-tab-${t}`);
         const panel = document.getElementById(`project-panel-${t}`);
         if (btn) btn.classList.toggle('is-active', t === tab);
         if (panel) panel.hidden = t !== tab;
     });
     if (tab === 'facts') loadProjectFacts();
+    if (tab === 'graph') loadProjectFactGraph();
     if (tab === 'conversations') loadProjectConversations();
     if (tab === 'vulns') loadProjectVulnerabilities();
+}
+
+let _selectedGraphFactKey = null;
+let _selectedGraphEdgeId = null;
+let _currentGraphData = null;
+let _graphConnectMode = false;
+let _graphConnectSource = null;
+
+function toggleProjectFactGraphConnectMode() {
+    _graphConnectMode = !_graphConnectMode;
+    _graphConnectSource = null;
+    const btn = document.getElementById('project-graph-connect-btn');
+    if (btn) {
+        btn.classList.toggle('is-active', _graphConnectMode);
+        btn.textContent = _graphConnectMode ? tp('projects.graphConnectActive') : tp('projects.graphConnect');
+        btn.classList.toggle('projects-graph-action-btn--connect-active', _graphConnectMode);
+    }
+    if (typeof ProjectFactGraph !== 'undefined') {
+        ProjectFactGraph.setConnectMode(_graphConnectMode, handleGraphConnectNodePick);
+    }
+}
+
+async function handleGraphConnectNodePick(factKey) {
+    if (!factKey || String(factKey).startsWith('vuln:')) return;
+    if (!_graphConnectSource) {
+        _graphConnectSource = factKey;
+        if (typeof showNotification === 'function') {
+            showNotification(tpFmt('projects.graphConnectPickTarget', `已选源节点 ${factKey}，请点击目标节点`, { source: factKey }), 'info');
+        }
+        return;
+    }
+    if (_graphConnectSource === factKey) return;
+    const edgeType = window.prompt(tp('projects.graphEdgeTypePrompt'), 'leads_to');
+    if (!edgeType) {
+        _graphConnectSource = null;
+        return;
+    }
+    const res = await apiFetch(`/api/projects/${currentProjectId}/fact-edges`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            source_fact_key: _graphConnectSource,
+            target_fact_key: factKey,
+            edge_type: edgeType.trim(),
+        }),
+    });
+    _graphConnectSource = null;
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return alert(err.error || tp('projects.graphConnectFailed'));
+    }
+    if (typeof showNotification === 'function') showNotification(tp('projects.graphConnectSuccess'), 'success');
+    loadProjectFactGraph();
+    loadProjectFacts();
+}
+
+function formatOutgoingLinksForModal(links) {
+    if (!links || !links.length) return '';
+    return links
+        .map((e) => `${e.edge_type || e.type}: ${e.target_fact_key || e.to}`)
+        .join('\n');
+}
+
+async function loadProjectFactGraph() {
+    const container = document.getElementById('project-fact-graph-container');
+    const statsEl = document.getElementById('project-fact-graph-stats');
+    if (!container || !currentProjectId) return;
+    container.innerHTML = `<div class="loading-spinner">${escapeHtml(tp('common.loading'))}</div>`;
+    closeProjectFactGraphSidebar();
+    const view = document.getElementById('project-graph-view')?.value || 'path';
+    const hideDeprecated = document.getElementById('project-facts-filter-hide-deprecated')?.checked !== false;
+    const params = new URLSearchParams({ view });
+    if (!hideDeprecated) params.set('exclude_deprecated', '0');
+    try {
+        const res = await apiFetch(`/api/projects/${currentProjectId}/fact-graph?${params}`);
+        if (!res.ok) throw new Error(tp('common.loadFailed'));
+        const data = await res.json();
+        _currentGraphData = data;
+        if (typeof ProjectFactGraph !== 'undefined') {
+            ProjectFactGraph.render(container, data, {
+                emptyText: tp('projects.graphEmpty'),
+                emptyTitle: tp('projects.graphEmptyTitle'),
+                emptySteps: [
+                    tp('projects.graphEmptyStep1'),
+                    tp('projects.graphEmptyStep2'),
+                    tp('projects.graphEmptyStep3'),
+                ],
+                emptyActionLabel: tp('projects.graphEmptyCta'),
+                onEmptyAction: () => showAddFactModal(),
+                onNodeSelect: (factKey) => showProjectFactGraphNode(factKey, _currentGraphData),
+                onEdgeSelect: (edgeId) => showProjectFactGraphEdge(edgeId, _currentGraphData),
+            });
+        }
+        const nodeCount = (data.nodes || []).length;
+        const edgeCount = (data.edges || []).length;
+        if (statsEl) {
+            statsEl.innerHTML =
+                `<span class="projects-graph-stat-badge"><strong>${nodeCount}</strong> ${escapeHtml(tp('projects.graphStatsNodes'))}</span>` +
+                `<span class="projects-graph-stat-badge"><strong>${edgeCount}</strong> ${escapeHtml(tp('projects.graphStatsEdges'))}</span>`;
+        }
+    } catch (e) {
+        container.innerHTML = `<div class="error-message">${escapeHtml(e.message || tp('common.loadFailed'))}</div>`;
+        if (statsEl) statsEl.textContent = '';
+    }
+}
+
+function filterProjectFactGraph() {
+    const q = document.getElementById('project-graph-search')?.value || '';
+    if (typeof ProjectFactGraph !== 'undefined') {
+        ProjectFactGraph.filterBySearch(q);
+    }
+}
+
+function centerProjectFactGraph() {
+    if (typeof ProjectFactGraph !== 'undefined') ProjectFactGraph.center();
+}
+
+function closeProjectFactGraphSidebar() {
+    _selectedGraphFactKey = null;
+    _selectedGraphEdgeId = null;
+    if (typeof ProjectFactGraph !== 'undefined') ProjectFactGraph.clearEdgeSelection();
+    const sidebar = document.getElementById('project-fact-graph-sidebar');
+    if (sidebar) sidebar.hidden = true;
+}
+
+function isSyntheticGraphEdge(edge) {
+    if (!edge) return true;
+    const id = String(edge.id || '');
+    const type = String(edge.type || '');
+    return id.startsWith('vuln-link:') || type === 'links_vuln';
+}
+
+function getGraphEdgesForFact(factKey, graphData) {
+    if (!factKey || !graphData?.edges) return [];
+    return graphData.edges.filter((e) => e.source === factKey || e.target === factKey);
+}
+
+function renderGraphEdgesListHtml(factKey, graphData, selectedEdgeId) {
+    const edges = getGraphEdgesForFact(factKey, graphData);
+    if (!edges.length) {
+        return `<p class="project-fact-graph-edges-empty">${escapeHtml(tp('projects.graphEdgesEmpty'))}</p>`;
+    }
+    return edges
+        .map((e) => {
+            const isOut = e.source === factKey;
+            const dirLabel = isOut ? tp('projects.graphEdgeOutgoing') : tp('projects.graphEdgeIncoming');
+            const other = isOut ? e.target : e.source;
+            const arrow = isOut ? '→' : '←';
+            const selected = e.id === selectedEdgeId ? ' is-selected' : '';
+            const synthetic = isSyntheticGraphEdge(e);
+            const deleteBtn = synthetic
+                ? `<span class="project-fact-graph-edge-synthetic" title="${escapeHtml(tp('projects.graphEdgeSynthetic'))}">—</span>`
+                : `<button type="button" class="project-fact-graph-edge-delete" data-edge-id="${escapeHtml(e.id)}" onclick="event.stopPropagation(); deleteProjectFactEdge(this.dataset.edgeId)" title="${escapeHtml(tp('projects.graphDeleteEdge'))}">×</button>`;
+            return `<div class="project-fact-graph-edge-item${selected}" data-edge-id="${escapeHtml(e.id)}" onclick="focusProjectFactGraphEdge(${JSON.stringify(e.id)})">
+                <span class="project-fact-graph-edge-dir">${escapeHtml(dirLabel)}</span>
+                <span class="project-fact-graph-edge-type">${escapeHtml(e.type || '')}</span>
+                <span class="project-fact-graph-edge-arrow">${arrow}</span>
+                <span class="project-fact-graph-edge-peer" title="${escapeHtml(other)}">${escapeHtml(other)}</span>
+                ${deleteBtn}
+            </div>`;
+        })
+        .join('');
+}
+
+function renderProjectFactGraphEdges(factKey, graphData, selectedEdgeId) {
+    const wrap = document.getElementById('project-fact-graph-edges-wrap');
+    const list = document.getElementById('project-fact-graph-edges-list');
+    if (!wrap || !list) return;
+    const edges = getGraphEdgesForFact(factKey, graphData);
+    wrap.hidden = false;
+    list.innerHTML = renderGraphEdgesListHtml(factKey, graphData, selectedEdgeId);
+    if (selectedEdgeId) {
+        const selectedEl = list.querySelector('[data-edge-id="' + String(selectedEdgeId).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]');
+        if (selectedEl) selectedEl.scrollIntoView({ block: 'nearest' });
+    }
+    if (!edges.length) wrap.hidden = false;
+}
+
+function showProjectFactGraphNode(factKey, graphData, selectedEdgeId) {
+    if (!factKey || String(factKey).startsWith('vuln:')) {
+        closeProjectFactGraphSidebar();
+        return;
+    }
+    _selectedGraphFactKey = factKey;
+    _selectedGraphEdgeId = selectedEdgeId || null;
+    const node = (graphData?.nodes || []).find((n) => n.fact_key === factKey || n.id === factKey);
+    const sidebar = document.getElementById('project-fact-graph-sidebar');
+    const titleEl = document.getElementById('project-fact-graph-node-title');
+    const metaEl = document.getElementById('project-fact-graph-node-meta');
+    const categoryEl = document.getElementById('project-fact-graph-node-category');
+    if (!sidebar || !titleEl || !metaEl) return;
+    titleEl.textContent = factKey;
+    if (categoryEl) {
+        const cat = node?.category || node?.type || '';
+        categoryEl.textContent = cat;
+        categoryEl.hidden = !cat;
+        categoryEl.className = 'project-fact-graph-node-category project-fact-graph-node-category--' + (cat || 'note');
+    }
+    const conf = node?.confidence || '';
+    const label = node?.label || '';
+    if (label || conf) {
+        const parts = [];
+        if (label) {
+            parts.push(`<span class="project-fact-graph-node-summary">${escapeHtml(label)}</span>`);
+        }
+        if (conf) {
+            parts.push(formatConfidenceBadge(conf));
+        }
+        metaEl.innerHTML = parts.join('');
+    } else {
+        metaEl.textContent = '';
+    }
+    renderProjectFactGraphEdges(factKey, graphData, _selectedGraphEdgeId);
+    if (_selectedGraphEdgeId && typeof ProjectFactGraph !== 'undefined') {
+        ProjectFactGraph.selectEdge(_selectedGraphEdgeId);
+    } else if (typeof ProjectFactGraph !== 'undefined') {
+        ProjectFactGraph.clearEdgeSelection();
+    }
+    sidebar.hidden = false;
+}
+
+function showProjectFactGraphEdge(edgeId, graphData) {
+    const edge = (graphData?.edges || []).find((e) => e.id === edgeId);
+    if (!edge) return;
+    const anchorKey = edge.source && !String(edge.source).startsWith('vuln:') ? edge.source : edge.target;
+    showProjectFactGraphNode(anchorKey, graphData, edgeId);
+}
+
+function focusProjectFactGraphEdge(edgeId) {
+    if (!edgeId || !_currentGraphData) return;
+    showProjectFactGraphEdge(edgeId, _currentGraphData);
+}
+
+async function deleteProjectFactEdge(edgeId) {
+    if (!edgeId || !currentProjectId) return;
+    const edge = (_currentGraphData?.edges || []).find((e) => e.id === edgeId);
+    if (isSyntheticGraphEdge(edge)) return;
+    if (!confirm(tp('projects.confirmDeleteGraphEdge'))) return;
+    const res = await apiFetch(`/api/projects/${currentProjectId}/fact-edges/${encodeURIComponent(edgeId)}`, {
+        method: 'DELETE',
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return alert(err.error || tp('projects.graphEdgeDeleteFailed'));
+    }
+    if (typeof showNotification === 'function') showNotification(tp('projects.graphEdgeDeleteSuccess'), 'success');
+    const keepKey = _selectedGraphFactKey;
+    await loadProjectFactGraph();
+    if (keepKey) showProjectFactGraphNode(keepKey, _currentGraphData);
+    loadProjectFacts();
+}
+
+function openSelectedGraphFactDetail() {
+    if (_selectedGraphFactKey) viewProjectFactBody(_selectedGraphFactKey);
+}
+
+function editSelectedGraphFact() {
+    if (_selectedGraphFactKey) showEditFactModal(_selectedGraphFactKey);
 }
 
 function buildProjectFactsQueryParams() {
     const params = new URLSearchParams();
     params.set('limit', '200');
+    params.set('include_link_counts', 'true');
     const search = document.getElementById('project-facts-search')?.value?.trim();
     const category = document.getElementById('project-facts-filter-category')?.value?.trim();
     const confidence = document.getElementById('project-facts-filter-confidence')?.value?.trim();
@@ -768,11 +1030,11 @@ function debouncedLoadProjectFacts() {
 async function loadProjectFacts() {
     const tbody = document.getElementById('project-facts-tbody');
     if (!tbody || !currentProjectId) return;
-    tbody.innerHTML = `<tr class="is-empty-row"><td colspan="7">${escapeHtml(tp('common.loading'))}</td></tr>`;
+    tbody.innerHTML = `<tr class="is-empty-row"><td colspan="8">${escapeHtml(tp('common.loading'))}</td></tr>`;
     const qs = buildProjectFactsQueryParams().toString();
     const res = await apiFetch(`/api/projects/${currentProjectId}/facts?${qs}`);
     if (!res.ok) {
-        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="7">${escapeHtml(tp('common.loadFailed'))}</td></tr>`;
+        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="8">${escapeHtml(tp('common.loadFailed'))}</td></tr>`;
         return;
     }
     const facts = await res.json();
@@ -782,7 +1044,7 @@ async function loadProjectFacts() {
             document.getElementById('project-facts-filter-category')?.value ||
             document.getElementById('project-facts-filter-confidence')?.value ||
             document.getElementById('project-facts-filter-sparse')?.checked;
-        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="7">${
+        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="8">${
             hasFilter ? tp('projects.noMatchingFacts') : tp('projects.noFacts')
         }</td></tr>`;
         refreshProjectHeaderStats();
@@ -797,10 +1059,16 @@ async function loadProjectFacts() {
         const pinBadge = f.pinned
             ? `<span class="projects-list-item-badge" title="${escapeHtml(tp('projects.pinned'))}">${escapeHtml(tp('projects.pinned'))}</span>`
             : '';
+        const lc = f.link_counts || {};
+        const linkBadge =
+            lc.outgoing || lc.incoming
+                ? `<span class="projects-fact-link-badge" title="${escapeHtml(tp('projects.linkCountsTitle'))}">↑${lc.outgoing || 0} ↓${lc.incoming || 0}</span>`
+                : '<span class="projects-fact-link-badge projects-fact-link-badge--empty">—</span>';
         return `<tr>
             <td class="cell-fact-key"><code class="projects-fact-key-chip" title="${keyEsc}">${keyEsc}</code>${pinBadge}${vulnLink}</td>
             <td class="cell-fact-category">${formatCategoryBadge(f.category)}</td>
             <td class="cell-summary" title="${escapeHtml(f.summary)}">${escapeHtml(f.summary)}</td>
+            <td class="cell-fact-links">${linkBadge}</td>
             <td>${formatFactBodyBadge(f)}</td>
             <td>${formatConfidenceBadge(f.confidence)}</td>
             <td>${formatProjectTime(f.updated_at, f.created_at)}</td>
@@ -849,6 +1117,7 @@ async function loadProjectConversations() {
             <td class="col-actions">
                 <div class="projects-table-actions">
                     <button type="button" class="projects-action-btn projects-action-btn--view" data-conv-id="${idEsc}" onclick="openProjectConversation(this.dataset.convId)">${escapeHtml(tp('projects.open'))}</button>
+                    <button type="button" class="projects-action-btn" data-conv-id="${idEsc}" onclick="promoteConversationAttackChain(this.dataset.convId)" title="${escapeHtml(tp('projects.promoteAttackChainTitle'))}">${escapeHtml(tp('projects.promoteAttackChain'))}</button>
                     <button type="button" class="projects-action-btn projects-action-btn--mute" data-conv-id="${idEsc}" onclick="unbindConversationFromProject(this.dataset.convId)" title="${escapeHtml(tp('projects.unbindProjectTitle'))}">${escapeHtml(tp('projects.unbind'))}</button>
                 </div>
             </td>
@@ -867,6 +1136,32 @@ function openProjectConversation(conversationId) {
             loadConversation(conversationId);
         }
     }, 200);
+}
+
+async function promoteConversationAttackChain(conversationId) {
+    if (!currentProjectId || !conversationId) return;
+    if (!confirm(tp('projects.confirmPromoteAttackChain'))) return;
+    const res = await apiFetch(
+        `/api/projects/${currentProjectId}/promote-attack-chain/${encodeURIComponent(conversationId)}`,
+        { method: 'POST' },
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return alert(err.error || tp('projects.promoteAttackChainFailed'));
+    }
+    const data = await res.json();
+    if (typeof showNotification === 'function') {
+        showNotification(
+            tpFmt(
+                'projects.promoteAttackChainSuccess',
+                `已沉淀 ${data.facts_created || 0} 新 / ${data.facts_updated || 0} 更新 / ${data.edges_created || 0} 边`,
+                data,
+            ),
+            'success',
+        );
+    }
+    loadProjectFacts();
+    if (currentProjectTab === 'graph') loadProjectFactGraph();
 }
 
 async function unbindConversationFromProject(conversationId) {
@@ -1509,6 +1804,8 @@ function resetFactModalForm() {
     if (pinEl) pinEl.checked = false;
     const rel = document.getElementById('fact-modal-related-vuln');
     if (rel) rel.value = '';
+    const linksEl = document.getElementById('fact-modal-links');
+    if (linksEl) linksEl.value = '';
     updateFactFormHints();
 }
 
@@ -1540,6 +1837,8 @@ function fillFactModalForm(f) {
     }
     const rel = document.getElementById('fact-modal-related-vuln');
     if (rel) rel.value = f.related_vulnerability_id || '';
+    const linksEl = document.getElementById('fact-modal-links');
+    if (linksEl) linksEl.value = formatOutgoingLinksForModal(f.outgoing_links);
     const pinEl = document.getElementById('fact-modal-pinned');
     if (pinEl) pinEl.checked = !!f.pinned;
     updateFactFormHints();
@@ -1556,7 +1855,7 @@ async function showEditFactModal(factKey) {
     resetFactModalForm();
     openProjectsOverlay('fact-modal', { focus: false });
     const res = await apiFetch(
-        `/api/projects/${currentProjectId}/facts?fact_key=${encodeURIComponent(factKey)}`,
+        `/api/projects/${currentProjectId}/facts?fact_key=${encodeURIComponent(factKey)}&include_links=true`,
     );
     if (!res.ok) {
         closeFactModal();
@@ -1594,6 +1893,7 @@ async function saveFactModal() {
         confidence: document.getElementById('fact-modal-confidence').value,
         pinned: !!document.getElementById('fact-modal-pinned')?.checked,
         related_vulnerability_id: document.getElementById('fact-modal-related-vuln')?.value?.trim() || '',
+        links_text: document.getElementById('fact-modal-links')?.value || '',
     };
     const editId = window._factModalEditId;
     const res = editId
@@ -1613,12 +1913,14 @@ async function saveFactModal() {
     }
     closeFactModal();
     loadProjectFacts();
+    if (currentProjectTab === 'graph') loadProjectFactGraph();
 }
 
 async function deleteProjectFact(id) {
     if (!confirm(tp('projects.confirmDeleteFact'))) return;
     await apiFetch(`/api/projects/${currentProjectId}/facts/${id}`, { method: 'DELETE' });
     loadProjectFacts();
+    if (currentProjectTab === 'graph') loadProjectFactGraph();
 }
 
 function parseProjectDate(t) {
@@ -1974,5 +2276,15 @@ window.viewFactsForVulnerability = viewFactsForVulnerability;
 window.openProjectConversation = openProjectConversation;
 window.unbindConversationFromProject = unbindConversationFromProject;
 window.loadProjectConversations = loadProjectConversations;
+window.loadProjectFactGraph = loadProjectFactGraph;
+window.filterProjectFactGraph = filterProjectFactGraph;
+window.centerProjectFactGraph = centerProjectFactGraph;
+window.closeProjectFactGraphSidebar = closeProjectFactGraphSidebar;
+window.openSelectedGraphFactDetail = openSelectedGraphFactDetail;
+window.editSelectedGraphFact = editSelectedGraphFact;
+window.promoteConversationAttackChain = promoteConversationAttackChain;
+window.deleteProjectFactEdge = deleteProjectFactEdge;
+window.focusProjectFactGraphEdge = focusProjectFactGraphEdge;
+window.toggleProjectFactGraphConnectMode = toggleProjectFactGraphConnectMode;
 window.rebuildProjectNameMap = rebuildProjectNameMap;
 window.projectNameById = projectNameById;
