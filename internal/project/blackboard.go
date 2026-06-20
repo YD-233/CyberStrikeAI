@@ -22,6 +22,12 @@ func AppendSystemPromptBlock(base, block string) string {
 	return base + "\n\n" + block
 }
 
+const (
+	factIndexFooterGetDetail = "需要完整内容（攻击链、POC、请求响应等）时必须调用 get_project_fact(fact_key)，禁止凭摘要臆造细节。"
+	factIndexFooterWriteHint = "写入事实时：summary 写「什么+在哪+如何验证」；body 写可复现全流程（发现/利用类 fact_key 建议 finding|chain|exploit|poc/ 前缀）。"
+	factIndexFooterEmpty     = "需要写入请使用 upsert_project_fact；需要详情请调用 get_project_fact(fact_key)。"
+)
+
 // BuildFactIndexBlock 为 Agent 系统提示生成项目黑板索引（仅 key + summary，不含 body）。
 func BuildFactIndexBlock(db *database.DB, projectID string, cfg config.ProjectConfig) (string, error) {
 	if db == nil || !cfg.Enabled {
@@ -42,7 +48,7 @@ func BuildFactIndexBlock(db *database.DB, projectID string, cfg config.ProjectCo
 		return "", err
 	}
 	if len(facts) == 0 {
-		return fmt.Sprintf("## 项目黑板索引（project: %s, id: %s）\n（暂无事实）\n需要写入请使用 upsert_project_fact；需要详情请调用 get_project_fact(fact_key)。", proj.Name, proj.ID), nil
+		return wrapFactIndexBlock(fmt.Sprintf("## 项目黑板索引（project: %s, id: %s）\n（暂无事实）\n%s", proj.Name, proj.ID, factIndexFooterEmpty)), nil
 	}
 
 	sort.SliceStable(facts, func(i, j int) bool {
@@ -72,7 +78,8 @@ func BuildFactIndexBlock(db *database.DB, projectID string, cfg config.ProjectCo
 	if omitted > 0 {
 		b.WriteString(fmt.Sprintf("\n（另有 %d 条未列入索引，请使用 list_project_facts 或 search_project_facts 查询。）\n", omitted))
 	}
-	b.WriteString("需要完整内容（攻击链、POC、请求响应等）时必须调用 get_project_fact(fact_key)，禁止凭摘要臆造细节。\n")
-	b.WriteString("写入事实时：summary 写「什么+在哪+如何验证」；body 写可复现全流程（发现/利用类 fact_key 建议 finding|chain|exploit|poc/ 前缀）。\n")
-	return b.String(), nil
+	b.WriteString(factIndexFooterGetDetail)
+	b.WriteByte('\n')
+	b.WriteString(factIndexFooterWriteHint)
+	return wrapFactIndexBlock(b.String()), nil
 }
