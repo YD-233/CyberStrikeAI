@@ -43,7 +43,7 @@ const AGENT_MODE_STORAGE_KEY = 'cyberstrike-chat-agent-mode';
 const REASONING_MODE_LS = 'cyberstrike-chat-reasoning-mode';
 const REASONING_EFFORT_LS = 'cyberstrike-chat-reasoning-effort';
 const CHAT_AGENT_MODE_EINO_SINGLE = 'eino_single';
-const CHAT_AGENT_EINO_MODES = ['deep', 'plan_execute', 'supervisor'];
+const CHAT_AGENT_EINO_MODES = ['deep', 'plan_execute', 'supervisor', 'blackboard'];
 let multiAgentAPIEnabled = false;
 
 // 人机协同（HITL）会话级配置
@@ -83,6 +83,7 @@ function normalizeOrchestrationClient(s) {
     const v = String(s || '').trim().toLowerCase().replace(/-/g, '_');
     if (v === 'plan_execute' || v === 'planexecute' || v === 'pe') return 'plan_execute';
     if (v === 'supervisor' || v === 'super' || v === 'sv') return 'supervisor';
+    if (v === 'blackboard' || v === 'cairn' || v === 'ooda' || v === 'bb') return 'blackboard';
     return 'deep';
 }
 
@@ -468,6 +469,8 @@ function getAgentModeLabelForValue(mode) {
                 return window.t('chat.agentModePlanExecuteLabel');
             case 'supervisor':
                 return window.t('chat.agentModeSupervisorLabel');
+            case 'blackboard':
+                return window.t('chat.agentModeBlackboardLabel');
             case CHAT_AGENT_MODE_EINO_SINGLE:
                 return window.t('chat.agentModeEinoSingle');
             default:
@@ -479,6 +482,7 @@ function getAgentModeLabelForValue(mode) {
         case 'deep': return 'Deep';
         case 'plan_execute': return 'Plan-Execute';
         case 'supervisor': return 'Supervisor';
+        case 'blackboard': return '黑板 OODA';
         default: return mode;
     }
 }
@@ -489,6 +493,7 @@ function getAgentModeIconForValue(mode) {
         case 'deep': return '🧩';
         case 'plan_execute': return '📋';
         case 'supervisor': return '🎯';
+        case 'blackboard': return '🗺️';
         default: return '🤖';
     }
 }
@@ -505,6 +510,11 @@ function syncAgentModeFromValue(value) {
         el.classList.toggle('selected', v === value);
     });
     syncReasoningRowVisibility(value);
+    // 黑板 OODA 模式：显示黑板入口按钮；其他模式下若无活跃运行则隐藏。
+    if (window.BlackboardPanel && typeof window.BlackboardPanel.showToggle === 'function') {
+        try { window.BlackboardPanel.showToggle(value === 'blackboard'); }
+        catch (e) { /* ignore */ }
+    }
 }
 
 function syncReasoningRowVisibility(modeVal) {
@@ -961,6 +971,13 @@ async function sendMessage() {
         if (useMulti && modeVal) {
             body.orchestration = modeVal;
         }
+        // 黑板 OODA 模式：新一轮运行前清空实时面板并显示入口按钮。
+        if (modeVal === 'blackboard' && window.BlackboardPanel) {
+            try {
+                window.BlackboardPanel.reset();
+                window.BlackboardPanel.showToggle(true);
+            } catch (e) { console.error('blackboard panel reset failed', e); }
+        }
         const response = await apiFetch(streamPath, {
             method: 'POST',
             headers: {
@@ -1047,6 +1064,16 @@ async function sendMessage() {
         }
         if (typeof loadActiveTasks === 'function') {
             loadActiveTasks();
+        }
+        // 流中断时，从服务端重新加载当前对话以与已持久化的助手回复对齐，
+        // 避免因网络掉线丢失后端已生成的回复。loadConversation 自带请求序号
+        // 守卫，可安全应对竞态；catch 每次发送只执行一次，无需额外的去重。
+        if (isNetwork && currentConversationId && typeof loadConversation === 'function') {
+            try {
+                loadConversation(currentConversationId);
+            } catch (reloadErr) {
+                console.error('流中断后重载对话失败:', reloadErr);
+            }
         }
         // 发送失败时，不恢复草稿，因为消息已经显示在对话框中了
     }

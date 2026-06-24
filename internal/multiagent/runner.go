@@ -5,19 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
-	"net/http"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"cyberstrike-ai/internal/agent"
 	"cyberstrike-ai/internal/agents"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/einomcp"
-	"cyberstrike-ai/internal/openai"
 	"cyberstrike-ai/internal/project"
 	"cyberstrike-ai/internal/reasoning"
 
@@ -93,6 +89,17 @@ func RunDeepAgent(
 	if o := strings.TrimSpace(orchestrationOverride); o != "" {
 		orchMode = config.NormalizeMultiAgentOrchestration(o)
 	}
+
+	// blackboard（Cairn 风格 OODA 黑板）走独立引擎，不依赖 Eino 预置编排。
+	// 复用同一套上层 SSE / 存储收尾（返回相同的 RunResult，progress 回调一致）。
+	if orchMode == "blackboard" {
+		return RunBlackboardAgent(
+			ctx, appCfg, ma, ag, db, logger,
+			conversationID, projectID, userMessage, history, roleTools,
+			progress, reasoningClient, systemPromptExtra,
+		)
+	}
+
 	if orchMode != "plan_execute" && ma.WithoutGeneralSubAgent && len(effectiveSubs) == 0 {
 		return nil, fmt.Errorf("multi_agent.without_general_sub_agent 为 true 时，必须在 multi_agent.sub_agents 或 agents 目录 Markdown 中配置至少一个子代理")
 	}
@@ -134,32 +141,16 @@ func RunDeepAgent(
 	toolInvokeNotify := einomcp.NewToolInvokeNotifyHolder()
 	mainDefs := ag.ToolsForRole(roleTools)
 
-	httpClient := &http.Client{
-		Timeout: 30 * time.Minute,
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   300 * time.Second,
-				KeepAlive: 300 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   10,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   30 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Minute,
-		},
+	// 双模型分层：主编排器/规划器走高档（解决能力强），子代理/执行器/摘要走低档（遵循好、快、省）。
+	// models 未配置时高/低都回退到 openai，等价于原单模型行为。
+	tm := prepareTierModels(appCfg, reasoningClient, logger)
+	if logger != nil && tm.active {
+		logger.Info("双模型分层路由已启用",
+			zap.String("orchestration", orchMode),
+			zap.String("high_model", tm.highCfg.Model),
+			zap.String("low_model", tm.lowCfg.Model),
+		)
 	}
-
-	// 若配置为 Claude provider，注入自动桥接 transport，对 Eino 透明走 Anthropic Messages API
-	httpClient = openai.NewEinoHTTPClient(&appCfg.OpenAI, httpClient)
-	openai.AttachSummarizationDiagTransport(httpClient, logger)
-
-	baseModelCfg := &einoopenai.ChatModelConfig{
-		APIKey:     appCfg.OpenAI.APIKey,
-		BaseURL:    strings.TrimSuffix(appCfg.OpenAI.BaseURL, "/"),
-		Model:      appCfg.OpenAI.Model,
-		HTTPClient: httpClient,
-	}
-	reasoning.ApplyToEinoChatModelConfig(baseModelCfg, &appCfg.OpenAI, reasoningClient)
 
 	deepMaxIter := agentMaxIterations(appCfg)
 
@@ -194,7 +185,8 @@ func RunDeepAgent(
 				}
 			}
 
-			subModel, err := einoopenai.NewChatModel(ctx, baseModelCfg)
+			subTier := tierForSub(sub)
+			subModel, err := einoopenai.NewChatModel(ctx, tm.cfgForTier(subTier))
 			if err != nil {
 				return nil, fmt.Errorf("子代理 %q ChatModel: %w", id, err)
 			}
@@ -205,7 +197,7 @@ func RunDeepAgent(
 				return nil, fmt.Errorf("子代理 %q 工具: %w", id, err)
 			}
 
-			subToolsForCfg, subPre, subToolSearchActive, err := prependEinoMiddlewares(ctx, &ma.EinoMiddleware, einoMWSub, subTools, einoLoc, skillsRoot, conversationID, projectID, logger)
+			subToolsForCfg, subPre, subToolSearchActive, err := prependEinoMiddlewares(ctx, &ma.EinoMiddleware, einoMWSub, subTools, einoLoc, skillsRoot, conversationID, projectID, appCfg.OpenAI.Model, logger)
 			if err != nil {
 				return nil, fmt.Errorf("子代理 %q eino 中间件: %w", id, err)
 			}
@@ -235,7 +227,7 @@ func RunDeepAgent(
 			// 孤儿 tool 消息兜底：放在 summarization 之后，telemetry 之前，
 			// 以便 telemetry 记录的 token 数与 LLM 实际入参一致。
 			subHandlers = append(subHandlers, newOrphanToolPrunerMiddleware(logger, "sub_agent:"+id))
-			if teleMw := newEinoModelInputTelemetryMiddleware(logger, appCfg.OpenAI.Model, conversationID, "sub_agent"); teleMw != nil {
+			if teleMw := newEinoModelInputTelemetryMiddleware(logger, tm.modelNameForTier(subTier), conversationID, "sub_agent"); teleMw != nil {
 				subHandlers = append(subHandlers, teleMw)
 			}
 
@@ -278,7 +270,7 @@ func RunDeepAgent(
 		}
 	}
 
-	mainModel, err := einoopenai.NewChatModel(ctx, baseModelCfg)
+	mainModel, err := einoopenai.NewChatModel(ctx, tm.cfgForTier("high"))
 	if err != nil {
 		return nil, fmt.Errorf("多代理主模型: %w", err)
 	}
@@ -314,7 +306,7 @@ func RunDeepAgent(
 	if err != nil {
 		return nil, err
 	}
-	mainToolsForCfg, mainOrchestratorPre, mainToolSearchActive, err := prependEinoMiddlewares(ctx, &ma.EinoMiddleware, einoMWMain, mainTools, einoLoc, skillsRoot, conversationID, projectID, logger)
+	mainToolsForCfg, mainOrchestratorPre, mainToolSearchActive, err := prependEinoMiddlewares(ctx, &ma.EinoMiddleware, einoMWMain, mainTools, einoLoc, skillsRoot, conversationID, projectID, appCfg.OpenAI.Model, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +373,7 @@ func RunDeepAgent(
 	}
 	deepHandlers = append(deepHandlers, mainSumMw)
 	deepHandlers = append(deepHandlers, newOrphanToolPrunerMiddleware(logger, "deep_orchestrator"))
-	if teleMw := newEinoModelInputTelemetryMiddleware(logger, appCfg.OpenAI.Model, conversationID, "deep_orchestrator"); teleMw != nil {
+	if teleMw := newEinoModelInputTelemetryMiddleware(logger, tm.modelNameForTier("high"), conversationID, "deep_orchestrator"); teleMw != nil {
 		deepHandlers = append(deepHandlers, teleMw)
 	}
 	if capMw := newModelFacingTraceMiddleware(modelFacingTrace); capMw != nil {
@@ -397,7 +389,7 @@ func RunDeepAgent(
 	}
 	supHandlers = append(supHandlers, mainSumMw)
 	supHandlers = append(supHandlers, newOrphanToolPrunerMiddleware(logger, "supervisor_orchestrator"))
-	if teleMw := newEinoModelInputTelemetryMiddleware(logger, appCfg.OpenAI.Model, conversationID, "supervisor_orchestrator"); teleMw != nil {
+	if teleMw := newEinoModelInputTelemetryMiddleware(logger, tm.modelNameForTier("high"), conversationID, "supervisor_orchestrator"); teleMw != nil {
 		supHandlers = append(supHandlers, teleMw)
 	}
 	if capMw := newModelFacingTraceMiddleware(modelFacingTrace); capMw != nil {
@@ -421,7 +413,7 @@ func RunDeepAgent(
 	var da adk.Agent
 	switch orchMode {
 	case "plan_execute":
-		execModel, perr := einoopenai.NewChatModel(ctx, baseModelCfg)
+		execModel, perr := einoopenai.NewChatModel(ctx, tm.cfgForTier("low"))
 		if perr != nil {
 			return nil, fmt.Errorf("plan_execute 执行器模型: %w", perr)
 		}

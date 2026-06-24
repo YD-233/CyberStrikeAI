@@ -7,6 +7,47 @@ let alwaysVisibleBuiltinToolNames = new Set();
 // key: 唯一工具标识符（toolKey），value: { enabled: boolean, is_external: boolean, external_mcp: string }
 let toolStateMap = new Map();
 
+// inferModelContextWindow —— 镜像后端 internal/config/config.go 的同名函数。
+// 按模型名推断上下文窗口（token），用于 max_total_tokens 留空时的占位符提示。
+// 改这里时同步改 Go 版本，两边保持一致。
+function inferModelContextWindow(model) {
+    const m = (model || '').toLowerCase().trim();
+    const k16 = 16000, k32 = 32000, k128 = 128000, k200 = 200000,
+          k256 = 256000, k400 = 400000, m1 = 1000000, m2 = 2000000;
+    if (m === '') return k128;
+    if (m.includes('gpt-3.5')) return k16;
+    if (m.includes('gpt-5')) return (m.includes('mini') || m.includes('nano')) ? k400 : m1;
+    if (m.includes('o1') || m.includes('o3') || m.includes('o4')) return k200;
+    if (m.includes('gpt-4o') || m.includes('gpt-4.1') || m.includes('gpt-4-turbo')) return k128;
+    if (m.includes('gpt-4-32k')) return k32;
+    if (m.includes('gpt-4')) return k32;
+    if (m.includes('claude')) return (m.includes('claude-2') || m.includes('claude-3')) ? k200 : m1;
+    if (m.includes('gemini')) return m1;
+    if (m.includes('grok')) {
+        if (m.includes('grok-4.')) return m1;
+        if (m.includes('grok-4')) return m2;
+        return m1;
+    }
+    if (m.includes('deepseek')) return m.includes('v4') ? m1 : 64000;
+    if (m.includes('qwen') || m.includes('qwq')) return (m.includes('qwen3') || m.includes('qwen-3')) ? m1 : k128;
+    if (m.includes('kimi') || m.includes('moonshot')) return k256;
+    if (m.includes('glm')) return (m.includes('glm-5') || m.includes('glm5')) ? m1 : k128;
+    if (m.includes('minimax')) return m1;
+    if (m.includes('mimo')) return m1;
+    return k128;
+}
+
+// updateMaxTokensPlaceholder —— 根据当前模型输入框的值，把推断窗口写进 max_total_tokens 的 placeholder，
+// 让用户留空时也能看到「自动会用多少」。手动填了数值则不动用户输入。
+function updateMaxTokensPlaceholder() {
+    const modelEl = document.getElementById('openai-model');
+    const maxTokensEl = document.getElementById('openai-max-total-tokens');
+    if (!maxTokensEl) return;
+    const inferred = inferModelContextWindow(modelEl ? modelEl.value : '');
+    maxTokensEl.placeholder = `自动：${inferred.toLocaleString()}（按模型推断，可留空）`;
+}
+
+
 // 生成工具的唯一标识符，用于区分同名但来源不同的工具
 function getToolKey(tool) {
     // 如果是外部工具，使用 external_mcp::tool.name 作为唯一标识
@@ -274,7 +315,15 @@ async function loadConfig(loadTools = true) {
         document.getElementById('openai-model').value = currentConfig.openai.model || '';
         const maxTokensEl = document.getElementById('openai-max-total-tokens');
         if (maxTokensEl) {
-            maxTokensEl.value = currentConfig.openai.max_total_tokens || 120000;
+            // 0 / 未设置 = 自动推断：留空输入框，由 placeholder 显示推断值；正数 = 手动覆盖，回填数值。
+            const mtt = parseInt(currentConfig.openai.max_total_tokens, 10);
+            maxTokensEl.value = (mtt > 0) ? mtt : '';
+        }
+        updateMaxTokensPlaceholder();
+        const modelEl = document.getElementById('openai-model');
+        if (modelEl && !modelEl.dataset.mttListener) {
+            modelEl.addEventListener('input', updateMaxTokensPlaceholder);
+            modelEl.dataset.mttListener = '1';
         }
         const orm = currentConfig.openai && currentConfig.openai.reasoning ? currentConfig.openai.reasoning : {};
         const orModeEl = document.getElementById('openai-reasoning-mode');
@@ -299,6 +348,7 @@ async function loadConfig(loadTools = true) {
         }
 
         fillVisionConfigFromCurrent(currentConfig.vision || {});
+        fillModelsConfigFromCurrent(currentConfig.models || {});
         initModelListControls();
 
         // 填充FOFA配置
@@ -1311,7 +1361,11 @@ async function applySettings() {
                 api_key: apiKey,
                 base_url: baseUrl,
                 model: model,
-                max_total_tokens: parseInt(document.getElementById('openai-max-total-tokens')?.value) || 120000,
+                // 留空 / 非正数 = 0（后端按模型自动推断窗口）；正数 = 手动覆盖。
+                max_total_tokens: (() => {
+                    const v = parseInt(document.getElementById('openai-max-total-tokens')?.value, 10);
+                    return (Number.isFinite(v) && v > 0) ? v : 0;
+                })(),
                 reasoning: {
                     ...(prevOpenai.reasoning || {}),
                     mode: document.getElementById('openai-reasoning-mode')?.value || 'auto',
@@ -1321,6 +1375,7 @@ async function applySettings() {
                 }
             },
             vision: visionPayload,
+            models: collectModelsConfigFromForm(),
             fofa: {
                 email: document.getElementById('fofa-email')?.value.trim() || '',
                 api_key: document.getElementById('fofa-api-key')?.value.trim() || '',
@@ -1577,6 +1632,120 @@ function syncVisionFormEnabled() {
     }
 }
 
+// ---------- 模型分层（high/low 双模型）表单 ----------
+// 单档位写入表单；档位缺省时各字段为空 => 运行时按字段回退到主 openai。
+function fillModelTierForm(tier, cfg) {
+    const ids = modelTierFieldIds(tier);
+    const c = cfg && typeof cfg === 'object' ? cfg : {};
+    const setVal = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.value = val != null ? String(val) : '';
+    };
+    const prov = document.getElementById(ids.provider);
+    if (prov) prov.value = (c.provider || '').trim();
+    setVal(ids.apiKey, c.api_key || '');
+    setVal(ids.baseUrl, c.base_url || '');
+    setVal(ids.model, c.model || '');
+}
+
+function fillModelsConfigFromCurrent(m) {
+    const models = m && typeof m === 'object' ? m : {};
+    const en = document.getElementById('models-enabled');
+    if (en) en.checked = models.enabled === true;
+    fillModelTierForm('high', models.high || {});
+    fillModelTierForm('low', models.low || {});
+    syncModelsFormEnabled();
+}
+
+// 收集单档位；全部字段为空时返回 null（不写入该档位，运行时整体回退到主 openai）。
+function collectModelTierFromForm(tier) {
+    const ids = modelTierFieldIds(tier);
+    const provider = document.getElementById(ids.provider)?.value.trim() || '';
+    const apiKey = document.getElementById(ids.apiKey)?.value.trim() || '';
+    const baseUrl = document.getElementById(ids.baseUrl)?.value.trim() || '';
+    const model = document.getElementById(ids.model)?.value.trim() || '';
+    if (!provider && !apiKey && !baseUrl && !model) {
+        return null;
+    }
+    const out = {};
+    if (provider) out.provider = provider;
+    // api_key 可能是后端回传的掩码占位符 ********，原样回传由后端按 base_url 还原
+    if (apiKey) out.api_key = apiKey;
+    if (baseUrl) out.base_url = baseUrl;
+    if (model) out.model = model;
+    return out;
+}
+
+function collectModelsConfigFromForm() {
+    const out = { enabled: document.getElementById('models-enabled')?.checked === true };
+    const high = collectModelTierFromForm('high');
+    const low = collectModelTierFromForm('low');
+    if (high) out.high = high;
+    if (low) out.low = low;
+    return out;
+}
+
+function syncModelsFormEnabled() {
+    const enabled = document.getElementById('models-enabled')?.checked === true;
+    const panel = document.getElementById('models-fields-panel');
+    if (panel) {
+        panel.style.opacity = enabled ? '1' : '0.55';
+        panel.querySelectorAll('input, select, textarea, a').forEach(el => {
+            // 留出「测试连接」「获取列表」「下拉 select」始终可点
+            if (/^test-models-(high|low)-btn$/.test(el.id)) return;
+            if (/^fetch-models-(high|low)-models-btn$/.test(el.id)) return;
+            if (/^models-(high|low)-model-select$/.test(el.id)) return;
+            el.disabled = !enabled;
+        });
+        syncModelListFetchButtons();
+    }
+}
+
+// 测试某一档位连接：archived 字段留空则继承主 openai；api_key 为掩码时由后端按 base_url 还原。
+async function testModelTierConnection(tier) {
+    const t = tier === 'high' ? 'high' : 'low';
+    const resultEl = document.getElementById('test-models-' + t + '-result');
+    const btn = document.getElementById('test-models-' + t + '-btn');
+    const creds = resolveModelListCredentials('models-' + t);
+    const ids = modelTierFieldIds(t);
+    const model = (document.getElementById(ids.model)?.value || '').trim()
+        || (document.getElementById('openai-model')?.value || '').trim();
+    if (!creds.api_key || !model) {
+        if (resultEl) {
+            resultEl.style.color = 'var(--danger-color, #e53e3e)';
+            resultEl.textContent = typeof window.t === 'function' ? window.t('settingsBasic.testFillRequired') : '请先填写 API Key 和模型';
+        }
+        return;
+    }
+    if (btn) { btn.style.pointerEvents = 'none'; btn.style.opacity = '0.5'; }
+    if (resultEl) {
+        resultEl.style.color = 'var(--text-muted, #888)';
+        resultEl.textContent = typeof window.t === 'function' ? window.t('settingsBasic.testing') : '测试中...';
+    }
+    try {
+        const response = await apiFetch('/api/config/test-openai', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: creds.provider, base_url: creds.base_url, api_key: creds.api_key, model: model })
+        });
+        const result = await response.json();
+        if (result.success) {
+            const latency = result.latency_ms ? ` (${result.latency_ms}ms)` : '';
+            const modelInfo = result.model ? ` [${result.model}]` : '';
+            resultEl.style.color = 'var(--success-color, #38a169)';
+            resultEl.textContent = (typeof window.t === 'function' ? window.t('settingsBasic.testSuccess') : '连接成功') + modelInfo + latency;
+        } else {
+            resultEl.style.color = 'var(--danger-color, #e53e3e)';
+            resultEl.textContent = (typeof window.t === 'function' ? window.t('settingsBasic.testFailed') : '连接失败') + ': ' + (result.error || '未知错误');
+        }
+    } catch (error) {
+        resultEl.style.color = 'var(--danger-color, #e53e3e)';
+        resultEl.textContent = (typeof window.t === 'function' ? window.t('settingsBasic.testError') : '测试出错') + ': ' + error.message;
+    } finally {
+        if (btn) { btn.style.pointerEvents = ''; btn.style.opacity = ''; }
+    }
+}
+
 const modelPickSelectMap = {};
 let modelPickSelectDocListener = false;
 
@@ -1761,8 +1930,17 @@ function initModelListControls() {
         visionProv.dataset.modelListBound = '1';
         visionProv.addEventListener('change', syncModelListFetchButtons);
     }
+    ['models-high-provider', 'models-low-provider'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el && !el.dataset.modelListBound) {
+            el.dataset.modelListBound = '1';
+            el.addEventListener('change', syncModelListFetchButtons);
+        }
+    });
     bindModelSelect('openai');
     bindModelSelect('vision');
+    bindModelSelect('models-high');
+    bindModelSelect('models-low');
     syncModelListFetchButtons();
 }
 
@@ -1770,7 +1948,24 @@ function modelSelectIds(scope) {
     if (scope === 'vision') {
         return { selectId: 'vision-model-select', inputId: 'vision-model' };
     }
+    if (scope === 'models-high') {
+        return { selectId: 'models-high-model-select', inputId: 'models-high-model' };
+    }
+    if (scope === 'models-low') {
+        return { selectId: 'models-low-model-select', inputId: 'models-low-model' };
+    }
     return { selectId: 'openai-model-select', inputId: 'openai-model' };
+}
+
+// 模型分层各层级表单字段 ID 映射；tier = 'high' | 'low'
+function modelTierFieldIds(tier) {
+    const t = tier === 'high' ? 'high' : 'low';
+    return {
+        provider: 'models-' + t + '-provider',
+        baseUrl: 'models-' + t + '-base-url',
+        apiKey: 'models-' + t + '-api-key',
+        model: 'models-' + t + '-model'
+    };
 }
 
 function bindModelSelect(scope) {
@@ -1793,6 +1988,16 @@ function resolveModelListCredentials(scope) {
         const baseUrl = (document.getElementById('vision-base-url')?.value || '').trim()
             || (document.getElementById('openai-base-url')?.value || '').trim();
         const apiKey = (document.getElementById('vision-api-key')?.value || '').trim()
+            || (document.getElementById('openai-api-key')?.value || '').trim();
+        return { provider, base_url: baseUrl, api_key: apiKey };
+    }
+    if (scope === 'models-high' || scope === 'models-low') {
+        const ids = modelTierFieldIds(scope === 'models-high' ? 'high' : 'low');
+        const tp = (document.getElementById(ids.provider)?.value || '').trim();
+        const provider = tp || document.getElementById('openai-provider')?.value || 'openai';
+        const baseUrl = (document.getElementById(ids.baseUrl)?.value || '').trim()
+            || (document.getElementById('openai-base-url')?.value || '').trim();
+        const apiKey = (document.getElementById(ids.apiKey)?.value || '').trim()
             || (document.getElementById('openai-api-key')?.value || '').trim();
         return { provider, base_url: baseUrl, api_key: apiKey };
     }
@@ -1855,6 +2060,36 @@ function syncModelListFetchButtons() {
             visionHint.style.display = 'none';
         }
     }
+
+    // 模型分层 high/low：provider 留空则继承上方 OpenAI，effective=claude 时隐藏「获取列表」
+    const syncTierFetch = function (tier) {
+        const tp = (document.getElementById('models-' + tier + '-provider')?.value || '').trim();
+        const effectiveProv = tp || openaiProv;
+        const isClaude = effectiveProv === 'claude';
+        const btn = document.getElementById('fetch-models-' + tier + '-models-btn');
+        const hint = document.getElementById('fetch-models-' + tier + '-models-hint');
+        const selectId = 'models-' + tier + '-model-select';
+        const select = document.getElementById(selectId);
+        if (btn) btn.style.display = isClaude ? 'none' : '';
+        if (select && isClaude) {
+            select.style.display = 'none';
+            const wrap = modelPickSelectMap[selectId];
+            if (wrap) wrap.wrapper.style.display = 'none';
+        } else if (select && !isClaude) {
+            syncModelPickDropdown(selectId);
+        }
+        if (hint) {
+            if (isClaude) {
+                hint.textContent = tFn('settingsBasic.modelsListClaudeHint');
+                hint.style.display = '';
+            } else {
+                hint.textContent = '';
+                hint.style.display = 'none';
+            }
+        }
+    };
+    syncTierFetch('high');
+    syncTierFetch('low');
 }
 
 function populateModelSelect(scope, models, currentValue) {
@@ -1894,9 +2129,16 @@ function populateModelSelect(scope, models, currentValue) {
 async function fetchModelList(scope) {
     const tFn = typeof window.t === 'function' ? window.t : (k) => k;
     const creds = resolveModelListCredentials(scope);
-    const btnId = scope === 'vision' ? 'fetch-vision-models-btn' : 'fetch-openai-models-btn';
-    const resultId = scope === 'vision' ? 'fetch-vision-models-result' : 'fetch-openai-models-result';
-    const inputId = scope === 'vision' ? 'vision-model' : 'openai-model';
+    // 各 scope 的「获取列表」按钮 / 结果区 / 模型输入框 ID
+    const scopeElIds = {
+        'vision': { btn: 'fetch-vision-models-btn', result: 'fetch-vision-models-result', input: 'vision-model' },
+        'models-high': { btn: 'fetch-models-high-models-btn', result: 'fetch-models-high-models-result', input: 'models-high-model' },
+        'models-low': { btn: 'fetch-models-low-models-btn', result: 'fetch-models-low-models-result', input: 'models-low-model' }
+    };
+    const ids = scopeElIds[scope] || { btn: 'fetch-openai-models-btn', result: 'fetch-openai-models-result', input: 'openai-model' };
+    const btnId = ids.btn;
+    const resultId = ids.result;
+    const inputId = ids.input;
     const btn = document.getElementById(btnId);
     const resultEl = document.getElementById(resultId);
     const inputEl = document.getElementById(inputId);

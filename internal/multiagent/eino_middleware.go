@@ -2,11 +2,13 @@ package multiagent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"cyberstrike-ai/internal/agent"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/mcp/builtin"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/cloudwego/eino/adk/middlewares/plantask"
 	"github.com/cloudwego/eino/adk/middlewares/reduction"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 )
 
@@ -118,7 +121,7 @@ func reductionCacheRootDir(configuredBase, projectID, conversationID string) str
 	return filepath.Join(base, "conversations", sanitizeEinoPathSegment(conv))
 }
 
-func buildReductionMiddleware(ctx context.Context, mw config.MultiAgentEinoMiddlewareConfig, projectID, convID string, loc *localbk.Local, logger *zap.Logger) (adk.ChatModelAgentMiddleware, error) {
+func buildReductionMiddleware(ctx context.Context, mw config.MultiAgentEinoMiddlewareConfig, projectID, convID string, loc *localbk.Local, modelName string, logger *zap.Logger) (adk.ChatModelAgentMiddleware, error) {
 	if loc == nil {
 		return nil, fmt.Errorf("reduction: local backend nil")
 	}
@@ -139,6 +142,7 @@ func buildReductionMiddleware(ctx context.Context, mw config.MultiAgentEinoMiddl
 		ClearExcludeTools: excl,
 		MaxLengthForTrunc: mw.ReductionMaxLengthForTruncEffective(),
 		MaxTokensForClear: int64(mw.ReductionMaxTokensForClearEffective()),
+		TokenCounter:      buildReductionTokenCounter(modelName),
 	})
 	if err != nil {
 		return nil, err
@@ -148,6 +152,49 @@ func buildReductionMiddleware(ctx context.Context, mw config.MultiAgentEinoMiddl
 	}
 	return redMW, nil
 }
+
+// buildReductionTokenCounter 用 tiktoken 精确计数，替换 Eino 默认的 ~4字符/token 估算，
+// 让 MaxTokensForClear 的清除时机基于真实 token 数而非字符数。
+// 这与 einoSummarizationTokenCounter 使用同一底层计数器，保证压缩触发与清除阈值口径一致。
+func buildReductionTokenCounter(modelName string) func(context.Context, []adk.Message, []*schema.ToolInfo) (int64, error) {
+	tc := agent.NewTikTokenCounter()
+	return func(_ context.Context, msgs []adk.Message, tools []*schema.ToolInfo) (int64, error) {
+		// We build a representative string from all roles/content/tool data.
+		var sb strings.Builder
+		for _, msg := range msgs {
+			if msg == nil {
+				continue
+			}
+			sb.WriteString(string(msg.Role))
+			sb.WriteByte('\n')
+			sb.WriteString(msg.Content)
+			sb.WriteByte('\n')
+			if len(msg.ToolCalls) > 0 {
+				if b, err := json.Marshal(msg.ToolCalls); err == nil {
+					sb.Write(b)
+					sb.WriteByte('\n')
+				}
+			}
+		}
+		for _, tl := range tools {
+			if tl == nil {
+				continue
+			}
+			if b, err := json.Marshal(tl); err == nil {
+				sb.Write(b)
+				sb.WriteByte('\n')
+			}
+		}
+		text := sb.String()
+		n, err := tc.Count(modelName, text)
+		if err != nil {
+			// tiktoken 失败（未知模型等）：回退到 (字节数+3)/4 估算。
+			return int64((len(text) + 3) / 4), nil
+		}
+		return int64(n), nil
+	}
+}
+
 
 // prependEinoMiddlewares returns handlers to prepend (outermost first) and optionally replaces tools when tool_search is used.
 // toolSearchActive is true when the toolsearch middleware was mounted (dynamic tools split off); callers should pass this to
@@ -161,6 +208,7 @@ func prependEinoMiddlewares(
 	skillsRoot string,
 	conversationID string,
 	projectID string,
+	modelName string,
 	logger *zap.Logger,
 ) (outTools []tool.BaseTool, extraHandlers []adk.ChatModelAgentMiddleware, toolSearchActive bool, err error) {
 	if mw == nil {
@@ -180,7 +228,7 @@ func prependEinoMiddlewares(
 		if place == einoMWSub && !mw.ReductionSubAgents {
 			// skip
 		} else {
-			redMW, rerr := buildReductionMiddleware(ctx, *mw, projectID, conversationID, einoLoc, logger)
+			redMW, rerr := buildReductionMiddleware(ctx, *mw, projectID, conversationID, einoLoc, modelName, logger)
 			if rerr != nil {
 				return nil, nil, false, rerr
 			}

@@ -4,7 +4,6 @@ package handler
 
 import (
 	"encoding/json"
-	"net/http"
 	"os"
 	"os/exec"
 	"time"
@@ -13,21 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
-
-// terminalResize is sent by the frontend when the xterm.js terminal is resized.
-type terminalResize struct {
-	Type string `json:"type"`
-	Cols uint16 `json:"cols"`
-	Rows uint16 `json:"rows"`
-}
-
-// wsUpgrader 仅用于系统设置中的终端 WebSocket，会复用已有的登录保护（JWT 中间件在上层路由组）
-var wsUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		// 由于已在 Gin 路由层做了认证，这里放宽 Origin，方便在同一域名下通过 HTTPS/WSS 访问
-		return true
-	},
-}
 
 // RunCommandWS 提供真正交互式 Shell：基于 WebSocket + PTY 的长会话
 // 前端建立 WebSocket 连接后，所有键盘输入都会透传到 Shell，Shell 的输出也会实时写回前端。

@@ -237,6 +237,7 @@ func (h *ConfigHandler) ApplyWechatRobotBinding(wc config.RobotWechatConfig) err
 // GetConfigResponse 获取配置响应
 type GetConfigResponse struct {
 	OpenAI     config.OpenAIConfig     `json:"openai"`
+	Models     config.ModelsConfig     `json:"models"`
 	Vision     config.VisionConfig     `json:"vision"`
 	FOFA       config.FofaConfig       `json:"fofa"`
 	MCP        config.MCPConfig        `json:"mcp"`
@@ -332,8 +333,13 @@ func (h *ConfigHandler) GetConfig(c *gin.Context) {
 		),
 	}
 
+	// 对外回显时脱敏密钥：openai 与 models 各档的 api_key 用占位符替换，避免明文泄露给浏览器。
+	maskedOpenAI := h.config.OpenAI
+	maskedOpenAI.APIKey = maskSecret(maskedOpenAI.APIKey)
+
 	c.JSON(http.StatusOK, GetConfigResponse{
-		OpenAI:     h.config.OpenAI,
+		OpenAI:     maskedOpenAI,
+		Models:     maskModelsSecrets(h.config.Models),
 		Vision:     h.config.Vision,
 		FOFA:       h.config.FOFA,
 		MCP:        h.config.MCP,
@@ -674,6 +680,7 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 // UpdateConfigRequest 更新配置请求
 type UpdateConfigRequest struct {
 	OpenAI     *config.OpenAIConfig         `json:"openai,omitempty"`
+	Models     *config.ModelsConfig         `json:"models,omitempty"`
 	Vision     *config.VisionConfig         `json:"vision,omitempty"`
 	FOFA       *config.FofaConfig           `json:"fofa,omitempty"`
 	MCP        *config.MCPConfig            `json:"mcp,omitempty"`
@@ -729,10 +736,29 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 
 	// 更新OpenAI配置
 	if req.OpenAI != nil {
+		// 还原被前端回显的占位符密钥：收到占位符则沿用内存中已存的真实密钥。
+		req.OpenAI.APIKey = resolveMaskedSecret(req.OpenAI.APIKey, h.config.OpenAI.APIKey)
 		h.config.OpenAI = *req.OpenAI
 		h.logger.Info("更新OpenAI配置",
 			zap.String("base_url", h.config.OpenAI.BaseURL),
 			zap.String("model", h.config.OpenAI.Model),
+		)
+	}
+
+	// 更新双模型分层（high/low）配置；各档密钥同样支持占位符保持原值。
+	if req.Models != nil {
+		applyModelsUpdate(&h.config.Models, req.Models)
+		var highModel, lowModel string
+		if h.config.Models.High != nil {
+			highModel = h.config.Models.High.Model
+		}
+		if h.config.Models.Low != nil {
+			lowModel = h.config.Models.Low.Model
+		}
+		h.logger.Info("更新双模型分层配置",
+			zap.Bool("enabled", h.config.Models.Enabled),
+			zap.String("high_model", highModel),
+			zap.String("low_model", lowModel),
 		)
 	}
 
@@ -975,6 +1001,11 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 		return
 	}
 
+	// 若前端回传脱敏占位符，按 base_url 还原已存储的真实密钥（无需用户重新输入）。
+	h.mu.RLock()
+	req.APIKey = h.resolveStoredKeyForTest(req.BaseURL, req.APIKey)
+	h.mu.RUnlock()
+
 	if strings.TrimSpace(req.APIKey) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key 不能为空"})
 		return
@@ -1095,6 +1126,11 @@ func (h *ConfigHandler) ListModels(c *gin.Context) {
 		})
 		return
 	}
+
+	// 还原脱敏占位符密钥（按 base_url 匹配已存储的真实密钥）。
+	h.mu.RLock()
+	req.APIKey = h.resolveStoredKeyForTest(req.BaseURL, req.APIKey)
+	h.mu.RUnlock()
 
 	if strings.TrimSpace(req.APIKey) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key 不能为空"})
@@ -1490,6 +1526,7 @@ func (h *ConfigHandler) saveConfig() error {
 	updateAgentConfig(root, h.config.Agent)
 	updateMCPConfig(root, h.config.MCP)
 	updateOpenAIConfig(root, h.config.OpenAI)
+	updateModelsConfig(root, h.config.Models)
 	updateVisionConfig(root, h.config.Vision)
 	updateFOFAConfig(root, h.config.FOFA)
 	updateKnowledgeConfig(root, h.config.Knowledge)
@@ -1657,9 +1694,8 @@ func updateOpenAIConfig(doc *yaml.Node, cfg config.OpenAIConfig) {
 	setStringInMap(openaiNode, "api_key", cfg.APIKey)
 	setStringInMap(openaiNode, "base_url", cfg.BaseURL)
 	setStringInMap(openaiNode, "model", cfg.Model)
-	if cfg.MaxTotalTokens > 0 {
-		setIntInMap(openaiNode, "max_total_tokens", cfg.MaxTotalTokens)
-	}
+	// 始终写回（含 0）：0 = 按模型自动推断窗口。否则用户清空字段时旧值会残留，切不回自动。
+	setIntInMap(openaiNode, "max_total_tokens", cfg.MaxTotalTokens)
 	rn := ensureMap(openaiNode, "reasoning")
 	if strings.TrimSpace(cfg.Reasoning.Mode) != "" {
 		setStringInMap(rn, "mode", cfg.Reasoning.Mode)
@@ -1673,6 +1709,48 @@ func updateOpenAIConfig(doc *yaml.Node, cfg config.OpenAIConfig) {
 	if strings.TrimSpace(cfg.Reasoning.Profile) != "" {
 		setStringInMap(rn, "profile", cfg.Reasoning.Profile)
 	}
+}
+
+// updateModelsTierNode 把某一档（high/low）有效配置写入 YAML 子节点。
+func updateModelsTierNode(parent *yaml.Node, key string, tier *config.OpenAIConfig) {
+	if tier == nil {
+		return
+	}
+	node := ensureMap(parent, key)
+	if strings.TrimSpace(tier.Provider) != "" {
+		setStringInMap(node, "provider", tier.Provider)
+	}
+	setStringInMap(node, "api_key", tier.APIKey)
+	setStringInMap(node, "base_url", tier.BaseURL)
+	setStringInMap(node, "model", tier.Model)
+	if tier.MaxTotalTokens > 0 {
+		setIntInMap(node, "max_total_tokens", tier.MaxTotalTokens)
+	}
+	if strings.TrimSpace(tier.Reasoning.Mode) != "" || strings.TrimSpace(tier.Reasoning.Effort) != "" ||
+		strings.TrimSpace(tier.Reasoning.Profile) != "" || tier.Reasoning.AllowClientReasoning != nil {
+		rn := ensureMap(node, "reasoning")
+		if strings.TrimSpace(tier.Reasoning.Mode) != "" {
+			setStringInMap(rn, "mode", tier.Reasoning.Mode)
+		}
+		if strings.TrimSpace(tier.Reasoning.Effort) != "" {
+			setStringInMap(rn, "effort", tier.Reasoning.Effort)
+		}
+		if strings.TrimSpace(tier.Reasoning.Profile) != "" {
+			setStringInMap(rn, "profile", tier.Reasoning.Profile)
+		}
+		if tier.Reasoning.AllowClientReasoning != nil {
+			setBoolInMap(rn, "allow_client_reasoning", *tier.Reasoning.AllowClientReasoning)
+		}
+	}
+}
+
+// updateModelsConfig 把双模型分层（high/low）写回 config.yaml 的 models 块。
+func updateModelsConfig(doc *yaml.Node, cfg config.ModelsConfig) {
+	root := doc.Content[0]
+	modelsNode := ensureMap(root, "models")
+	setBoolInMap(modelsNode, "enabled", cfg.Enabled)
+	updateModelsTierNode(modelsNode, "high", cfg.High)
+	updateModelsTierNode(modelsNode, "low", cfg.Low)
 }
 
 func updateFOFAConfig(doc *yaml.Node, cfg config.FofaConfig) {

@@ -49,7 +49,7 @@ func newEinoSummarizationMiddleware(
 	if summaryModel == nil || appCfg == nil {
 		return nil, fmt.Errorf("multiagent: summarization 需要 model 与配置")
 	}
-	maxTotal := appCfg.OpenAI.MaxTotalTokens
+	maxTotal := appCfg.OpenAI.MaxTotalTokensEffective()
 	if maxTotal <= 0 {
 		maxTotal = 120000
 	}

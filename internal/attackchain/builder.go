@@ -51,24 +51,13 @@ func NewBuilder(db *database.DB, openAIConfig *config.OpenAIConfig, logger *zap.
 	}
 	httpClient := &http.Client{Timeout: 5 * time.Minute, Transport: transport}
 
-	// 优先使用配置文件中的统一 Token 上限（config.yaml -> openai.max_total_tokens）
+	// 优先使用配置文件中的统一 Token 上限（config.yaml -> openai.max_total_tokens）；
+	// 未显式配置时按模型名推断（统一走 config.OpenAIConfig.MaxTotalTokensEffective）。
 	maxTokens := 0
-	if openAIConfig != nil && openAIConfig.MaxTotalTokens > 0 {
-		maxTokens = openAIConfig.MaxTotalTokens
-	} else if openAIConfig != nil {
-		// 如果未显式配置 max_total_tokens，则根据模型设置一个合理的默认值
-		model := strings.ToLower(openAIConfig.Model)
-		if strings.Contains(model, "gpt-4") {
-			maxTokens = 128000 // gpt-4通常支持128k
-		} else if strings.Contains(model, "gpt-3.5") {
-			maxTokens = 16000 // gpt-3.5-turbo通常支持16k
-		} else if strings.Contains(model, "deepseek") {
-			maxTokens = 131072 // deepseek-chat通常支持131k
-		} else {
-			maxTokens = 100000 // 兜底默认值
-		}
-	} else {
-		// 没有 OpenAI 配置时使用兜底值，避免为 0
+	if openAIConfig != nil {
+		maxTokens = openAIConfig.MaxTotalTokensEffective()
+	}
+	if maxTokens <= 0 {
 		maxTokens = 100000
 	}
 

@@ -995,6 +995,51 @@
 
                         <!-- 对话界面 -->
                         <div class="chat-container">
+                            <!-- 黑板实时面板（Cairn OODA 编排）：切到「黑板 OODA」模式运行时展示事实/意图/提示 -->
+                            <button type="button" id="blackboard-toggle-btn" class="blackboard-toggle-btn" style="display:none;" aria-expanded="false" aria-controls="blackboard-panel" data-i18n="chat.bbToggle" data-i18n-attr="title" title="黑板视图">
+                                <span class="bb-toggle-glyph" aria-hidden="true">🗺️</span>
+                                <span class="bb-toggle-dot" aria-hidden="true"></span>
+                            </button>
+                            <aside id="blackboard-panel" class="blackboard-panel" aria-hidden="true" aria-label="黑板">
+                                <div class="bb-header">
+                                    <div class="bb-header-title">
+                                        <span class="bb-header-icon" aria-hidden="true">🗺️</span>
+                                        <span data-i18n="chat.bbTitle">事实-意图黑板</span>
+                                        <span id="bb-phase-badge" class="bb-phase-badge bb-phase-idle" data-i18n="chat.bbPhaseIdle">未运行</span>
+                                    </div>
+                                    <button type="button" id="bb-close-btn" class="bb-close-btn" aria-label="关闭" data-i18n="chat.bbClose" data-i18n-attr="aria-label,title" title="关闭">×</button>
+                                </div>
+                                <div class="bb-body">
+                                    <section class="bb-section bb-section-facts">
+                                        <h4 class="bb-section-title">
+                                            <span data-i18n="chat.bbFacts">事实</span>
+                                            <span id="bb-count-facts" class="bb-count">0</span>
+                                        </h4>
+                                        <div id="bb-facts-list" class="bb-list"></div>
+                                    </section>
+                                    <section class="bb-section bb-section-intents">
+                                        <h4 class="bb-section-title">
+                                            <span data-i18n="chat.bbIntents">意图</span>
+                                            <span id="bb-count-intents" class="bb-count">0</span>
+                                        </h4>
+                                        <div id="bb-intents-list" class="bb-list"></div>
+                                    </section>
+                                    <section class="bb-section bb-section-hints">
+                                        <h4 class="bb-section-title">
+                                            <span data-i18n="chat.bbHints">人类提示</span>
+                                            <span id="bb-count-hints" class="bb-count">0</span>
+                                        </h4>
+                                        <div id="bb-hints-list" class="bb-list"></div>
+                                    </section>
+                                </div>
+                                <div class="bb-hint-box">
+                                    <textarea id="bb-hint-input" class="bb-hint-input" rows="2" data-i18n="chat.bbHintPlaceholder" data-i18n-attr="placeholder" placeholder="注入一条人类提示（Hint），worker 下次读板时吸收… Ctrl+Enter 发送"></textarea>
+                                    <div class="bb-hint-row">
+                                        <span id="bb-hint-status" class="bb-hint-status"></span>
+                                        <button type="button" id="bb-hint-send-btn" class="bb-hint-send-btn" data-i18n="chat.bbHintSend">注入提示</button>
+                                    </div>
+                                </div>
+                            </aside>
                             <!-- 会话顶部栏（只在有会话选中时显示） -->
                             <div id="conversation-header" class="conversation-header" style="display: none;">
                                 <div class="conversation-header-content">
@@ -1111,6 +1156,14 @@
                                                         <div class="role-selection-item-description-main" data-i18n="chat.agentModeSupervisorHint">监督者协调，transfer 委派子代理</div>
                                                     </div>
                                                     <div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="supervisor">✓</div>
+                                                </button>
+                                                <button type="button" class="role-selection-item-main agent-mode-option" data-value="blackboard" role="option" onclick="selectAgentMode('blackboard')">
+                                                    <div class="role-selection-item-icon-main" aria-hidden="true">🗺️</div>
+                                                    <div class="role-selection-item-content-main">
+                                                        <div class="role-selection-item-name-main" data-i18n="chat.agentModeBlackboardLabel">黑板 OODA（Cairn）</div>
+                                                        <div class="role-selection-item-description-main" data-i18n="chat.agentModeBlackboardHint">事实-意图黑板 + OODA 循环，多 worker 通过共享黑板协调（Stigmergy）</div>
+                                                    </div>
+                                                    <div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="blackboard">✓</div>
                                                 </button>
                                             </div>
                                         </div>
@@ -2551,8 +2604,8 @@
                                         </div>
                                         <div class="form-group">
                                             <label for="openai-max-total-tokens"><span data-i18n="settingsBasic.maxTotalTokens">最大上下文 Token 数</span></label>
-                                            <input type="number" id="openai-max-total-tokens" data-i18n="settingsBasic.maxTotalTokensPlaceholder" data-i18n-attr="placeholder" placeholder="120000" min="1000" step="1000" />
-                                            <small style="color: var(--text-muted, #718096); font-size: 0.75rem;" data-i18n="settingsBasic.maxTotalTokensHint">内存压缩和攻击链构建共用此配置，默认 120000</small>
+                                            <input type="number" id="openai-max-total-tokens" data-i18n="settingsBasic.maxTotalTokensPlaceholder" data-i18n-attr="placeholder" placeholder="留空=按模型自动推断" min="1000" step="1000" />
+                                            <small style="color: var(--text-muted, #718096); font-size: 0.75rem;" data-i18n="settingsBasic.maxTotalTokensHint">留空则按模型名自动推断上下文窗口（如 1M）；填数字可手动覆盖。内存压缩与攻击链构建共用此配置</small>
                                         </div>
                                         <div class="form-group">
                                             <label data-i18n="settingsBasic.openaiReasoningTitle">模型推理（Eino）</label>
@@ -2590,6 +2643,93 @@
                                         <div style="display: flex; align-items: center; gap: 8px; margin-top: 2px;">
                                             <a href="javascript:void(0)" id="test-openai-btn" onclick="testOpenAIConnection()" style="font-size: 0.8125rem; color: var(--accent-color, #3182ce); text-decoration: none; cursor: pointer; user-select: none;" data-i18n="settingsBasic.testConnection">测试连接</a>
                                             <span id="test-openai-result" style="font-size: 0.8125rem;"></span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 模型分层（高级 / 低级双模型） -->
+                                <div class="settings-subsection">
+                                    <h4 data-i18n="settingsBasic.modelsLayeringConfig">模型分层（高级 / 低级双模型）</h4>
+                                    <div class="settings-form">
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="models-enabled" class="modern-checkbox" onchange="syncModelsFormEnabled()" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settingsBasic.modelsLayeringEnabled">启用模型分层路由</span>
+                                            </label>
+                                            <small class="form-hint" data-i18n="settingsBasic.modelsLayeringHint">按角色分层：编排 / 规划 / 推理走高级模型，子代理 / 执行 / 探索 / 摘要走低级模型。任一字段留空则复用上方 OpenAI 配置。</small>
+                                        </div>
+                                        <div id="models-fields-panel">
+                                            <div class="model-tier-card" style="border: 1px solid var(--border-color, #e2e8f0); border-radius: 8px; padding: 12px; margin-bottom: 12px;">
+                                                <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 8px;" data-i18n="settingsBasic.modelsHighTitle">高级模型（强解决力，如 Claude Opus）</div>
+                                                <div class="form-group">
+                                                    <label for="models-high-provider" data-i18n="settingsBasic.provider">提供商</label>
+                                                    <select id="models-high-provider" style="width: 100%; padding: 0.5rem 0.75rem; border: 1px solid var(--border-color, #e2e8f0); border-radius: 6px; background: var(--card-bg, #fff); color: var(--text-color, #2d3748); font-size: 0.875rem;">
+                                                        <option value="" data-i18n="settingsBasic.modelsTierProviderInherit">复用上方 OpenAI 配置</option>
+                                                        <option value="openai">OpenAI / 兼容 OpenAI 协议</option>
+                                                        <option value="claude">Claude (Anthropic Messages API)</option>
+                                                    </select>
+                                                </div>
+                                                <div class="form-group">
+                                                    <label for="models-high-base-url" data-i18n="settingsBasic.baseUrl">Base URL</label>
+                                                    <input type="text" id="models-high-base-url" data-i18n="settingsBasic.modelsTierBaseUrlPlaceholder" data-i18n-attr="placeholder" placeholder="留空则复用 OpenAI Base URL" />
+                                                </div>
+                                                <div class="form-group">
+                                                    <label for="models-high-api-key" data-i18n="settingsBasic.apiKey">API Key</label>
+                                                    <input type="password" id="models-high-api-key" data-i18n="settingsBasic.modelsTierApiKeyPlaceholder" data-i18n-attr="placeholder" placeholder="留空则复用 OpenAI API Key" />
+                                                </div>
+                                                <div class="form-group">
+                                                    <label for="models-high-model" data-i18n="settingsBasic.model">模型</label>
+                                                    <div class="model-pick-row">
+                                                        <input type="text" id="models-high-model" class="model-pick-input" data-i18n="settingsBasic.modelsHighModelPlaceholder" data-i18n-attr="placeholder" placeholder="claude-opus-4" />
+                                                        <select id="models-high-model-select" class="model-pick-native" style="display: none;" aria-hidden="true" tabindex="-1">
+                                                            <option value="" disabled data-i18n="settingsBasic.modelsListSelectPlaceholder">请选择模型</option>
+                                                        </select>
+                                                        <a href="javascript:void(0)" id="fetch-models-high-models-btn" class="model-pick-fetch-link" onclick="fetchModelList('models-high')" data-i18n="settingsBasic.fetchModels">获取列表</a>
+                                                    </div>
+                                                    <small id="fetch-models-high-models-hint" class="form-hint" style="display: none; font-size: 0.75rem; margin-top: 4px;"></small>
+                                                    <span id="fetch-models-high-models-result" style="font-size: 0.75rem; margin-top: 2px; display: block;"></span>
+                                                </div>
+                                                <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+                                                    <a href="javascript:void(0)" id="test-models-high-btn" onclick="testModelTierConnection('high')" style="font-size: 0.8125rem; color: var(--accent-color, #3182ce); text-decoration: none; cursor: pointer;" data-i18n="settingsBasic.testConnection">测试连接</a>
+                                                    <span id="test-models-high-result" style="font-size: 0.8125rem;"></span>
+                                                </div>
+                                            </div>
+                                            <div class="model-tier-card" style="border: 1px solid var(--border-color, #e2e8f0); border-radius: 8px; padding: 12px;">
+                                                <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 8px;" data-i18n="settingsBasic.modelsLowTitle">低级模型（指令遵循好、速度快，如 Deepseek Flash）</div>
+                                                <div class="form-group">
+                                                    <label for="models-low-provider" data-i18n="settingsBasic.provider">提供商</label>
+                                                    <select id="models-low-provider" style="width: 100%; padding: 0.5rem 0.75rem; border: 1px solid var(--border-color, #e2e8f0); border-radius: 6px; background: var(--card-bg, #fff); color: var(--text-color, #2d3748); font-size: 0.875rem;">
+                                                        <option value="" data-i18n="settingsBasic.modelsTierProviderInherit">复用上方 OpenAI 配置</option>
+                                                        <option value="openai">OpenAI / 兼容 OpenAI 协议</option>
+                                                        <option value="claude">Claude (Anthropic Messages API)</option>
+                                                    </select>
+                                                </div>
+                                                <div class="form-group">
+                                                    <label for="models-low-base-url" data-i18n="settingsBasic.baseUrl">Base URL</label>
+                                                    <input type="text" id="models-low-base-url" data-i18n="settingsBasic.modelsTierBaseUrlPlaceholder" data-i18n-attr="placeholder" placeholder="留空则复用 OpenAI Base URL" />
+                                                </div>
+                                                <div class="form-group">
+                                                    <label for="models-low-api-key" data-i18n="settingsBasic.apiKey">API Key</label>
+                                                    <input type="password" id="models-low-api-key" data-i18n="settingsBasic.modelsTierApiKeyPlaceholder" data-i18n-attr="placeholder" placeholder="留空则复用 OpenAI API Key" />
+                                                </div>
+                                                <div class="form-group">
+                                                    <label for="models-low-model" data-i18n="settingsBasic.model">模型</label>
+                                                    <div class="model-pick-row">
+                                                        <input type="text" id="models-low-model" class="model-pick-input" data-i18n="settingsBasic.modelsLowModelPlaceholder" data-i18n-attr="placeholder" placeholder="deepseek-chat" />
+                                                        <select id="models-low-model-select" class="model-pick-native" style="display: none;" aria-hidden="true" tabindex="-1">
+                                                            <option value="" disabled data-i18n="settingsBasic.modelsListSelectPlaceholder">请选择模型</option>
+                                                        </select>
+                                                        <a href="javascript:void(0)" id="fetch-models-low-models-btn" class="model-pick-fetch-link" onclick="fetchModelList('models-low')" data-i18n="settingsBasic.fetchModels">获取列表</a>
+                                                    </div>
+                                                    <small id="fetch-models-low-models-hint" class="form-hint" style="display: none; font-size: 0.75rem; margin-top: 4px;"></small>
+                                                    <span id="fetch-models-low-models-result" style="font-size: 0.75rem; margin-top: 2px; display: block;"></span>
+                                                </div>
+                                                <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+                                                    <a href="javascript:void(0)" id="test-models-low-btn" onclick="testModelTierConnection('low')" style="font-size: 0.8125rem; color: var(--accent-color, #3182ce); text-decoration: none; cursor: pointer;" data-i18n="settingsBasic.testConnection">测试连接</a>
+                                                    <span id="test-models-low-result" style="font-size: 0.8125rem;"></span>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -4495,6 +4635,7 @@
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
+    <script src="/static/js/blackboard-panel.js"></script>
     <script src="/static/js/projects.js"></script>
     <script src="/static/js/vulnerability.js?v=12"></script>
     <script src="/static/js/webshell.js"></script>

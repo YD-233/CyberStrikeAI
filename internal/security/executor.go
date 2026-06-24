@@ -409,11 +409,13 @@ func (e *Executor) buildCommandArgs(toolName string, toolConfig *config.ToolConf
 			switch format {
 			case "flag":
 				// --flag value 或 -f value
-				if param.Flag != "" {
-					cmdArgs = append(cmdArgs, param.Flag)
-				}
+				// 非布尔标志期望一个值；若格式化后的值为空（如可选参数未提供），
+				// 则既不追加标志也不追加值，避免出现吞掉下一个参数的悬空标志（如 --script）。
 				formattedValue := e.formatParamValue(param, value)
 				if formattedValue != "" {
+					if param.Flag != "" {
+						cmdArgs = append(cmdArgs, param.Flag)
+					}
 					cmdArgs = append(cmdArgs, formattedValue)
 				}
 			case "combined":

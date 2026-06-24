@@ -1080,6 +1080,12 @@ func setupRoutes(
 		protected.DELETE("/projects/:id/facts/:factId", projectHandler.DeleteFact)
 		protected.POST("/projects/:id/facts/deprecate", projectHandler.DeprecateFact)
 		protected.POST("/projects/:id/facts/restore", projectHandler.RestoreFact)
+		// 黑板 Intent / Hint（Cairn 三原语；Fact 复用上方 facts*）
+		protected.GET("/projects/:id/intents", projectHandler.ListIntents)
+		protected.POST("/projects/:id/intents", projectHandler.CreateIntent)
+		protected.GET("/projects/:id/hints", projectHandler.ListHints)
+		protected.POST("/projects/:id/hints", projectHandler.CreateHint)
+		protected.POST("/projects/:id/hints/:hintId/archive", projectHandler.ArchiveHint)
 
 		// WebShell 管理（代理执行 + 连接配置存 SQLite）
 		protected.GET("/webshell/connections", webshellHandler.ListConnections)

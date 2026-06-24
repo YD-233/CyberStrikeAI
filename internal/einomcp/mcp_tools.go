@@ -58,6 +58,12 @@ func ToolsFromDefinitions(
 	return out, nil
 }
 
+// ToolInfoFromDefinition 将 OpenAI 风格的 agent.Tool 定义转为 Eino *schema.ToolInfo，
+// 供非 ADK 路径（如 OODA 黑板引擎）直接绑定到 ChatModel.WithTools 使用。
+func ToolInfoFromDefinition(d agent.Tool) (*schema.ToolInfo, error) {
+	return toolInfoFromDefinition(d)
+}
+
 func toolInfoFromDefinition(d agent.Tool) (*schema.ToolInfo, error) {
 	fn := d.Function
 	raw, err := json.Marshal(fn.Parameters)

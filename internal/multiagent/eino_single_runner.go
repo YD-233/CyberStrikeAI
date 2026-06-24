@@ -3,17 +3,12 @@ package multiagent
 import (
 	"context"
 	"fmt"
-	"net"
-	"net/http"
-	"strings"
 	"sync"
-	"time"
 
 	"cyberstrike-ai/internal/agent"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/einomcp"
-	"cyberstrike-ai/internal/openai"
 	"cyberstrike-ai/internal/project"
 	"cyberstrike-ai/internal/reasoning"
 
@@ -88,37 +83,18 @@ func RunEinoSingleChatModelAgent(
 		return nil, err
 	}
 
-	mainToolsForCfg, mainOrchestratorPre, singleToolSearchActive, err := prependEinoMiddlewares(ctx, &ma.EinoMiddleware, einoMWMain, mainTools, einoLoc, skillsRoot, conversationID, projectID, logger)
+	mainToolsForCfg, mainOrchestratorPre, singleToolSearchActive, err := prependEinoMiddlewares(ctx, &ma.EinoMiddleware, einoMWMain, mainTools, einoLoc, skillsRoot, conversationID, projectID, appCfg.OpenAI.Model, logger)
 	if err != nil {
 		return nil, fmt.Errorf("eino single eino 中间件: %w", err)
 	}
 
-	httpClient := &http.Client{
-		Timeout: 30 * time.Minute,
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   300 * time.Second,
-				KeepAlive: 300 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   10,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   30 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Minute,
-		},
+	// 单代理为主脑，默认走高档模型（解决能力强）。models 未配置时回退到 openai。
+	tm := prepareTierModels(appCfg, reasoningClient, logger)
+	if logger != nil && tm.active {
+		logger.Info("eino 单代理使用高档模型", zap.String("high_model", tm.highCfg.Model))
 	}
-	httpClient = openai.NewEinoHTTPClient(&appCfg.OpenAI, httpClient)
-	openai.AttachSummarizationDiagTransport(httpClient, logger)
 
-	baseModelCfg := &einoopenai.ChatModelConfig{
-		APIKey:     appCfg.OpenAI.APIKey,
-		BaseURL:    strings.TrimSuffix(appCfg.OpenAI.BaseURL, "/"),
-		Model:      appCfg.OpenAI.Model,
-		HTTPClient: httpClient,
-	}
-	reasoning.ApplyToEinoChatModelConfig(baseModelCfg, &appCfg.OpenAI, reasoningClient)
-
-	mainModel, err := einoopenai.NewChatModel(ctx, baseModelCfg)
+	mainModel, err := einoopenai.NewChatModel(ctx, tm.cfgForTier("high"))
 	if err != nil {
 		return nil, fmt.Errorf("eino single 模型: %w", err)
 	}
@@ -145,7 +121,7 @@ func RunEinoSingleChatModelAgent(
 		handlers = append(handlers, einoSkillMW)
 	}
 	handlers = append(handlers, mainSumMw)
-	if teleMw := newEinoModelInputTelemetryMiddleware(logger, appCfg.OpenAI.Model, conversationID, "eino_single"); teleMw != nil {
+	if teleMw := newEinoModelInputTelemetryMiddleware(logger, tm.modelNameForTier("high"), conversationID, "eino_single"); teleMw != nil {
 		handlers = append(handlers, teleMw)
 	}
 	if capMw := newModelFacingTraceMiddleware(modelFacingTrace); capMw != nil {

@@ -31,7 +31,8 @@ type FrontMatter struct {
 	Tools         interface{} `yaml:"tools"` // 字符串 "A, B" 或 []string
 	MaxIterations int         `yaml:"max_iterations"`
 	BindRole      string      `yaml:"bind_role,omitempty"`
-	Kind          string      `yaml:"kind,omitempty"` // orchestrator = 主代理（亦可仅用文件名 orchestrator.md）
+	Kind          string      `yaml:"kind,omitempty"`       // orchestrator = 主代理（亦可仅用文件名 orchestrator.md）
+	ModelTier     string      `yaml:"model_tier,omitempty"` // high | low；子代理使用的模型档位，空则按默认（low）
 }
 
 // OrchestratorMarkdown 从 agents 目录解析出的主代理（Deep 协调者）定义。
@@ -282,6 +283,7 @@ func subAgentFromFrontMatter(filename string, fm FrontMatter, body string) (conf
 	out.MaxIterations = fm.MaxIterations
 	out.BindRole = strings.TrimSpace(fm.BindRole)
 	out.Kind = strings.TrimSpace(fm.Kind)
+	out.ModelTier = strings.TrimSpace(fm.ModelTier)
 	return out, nil
 }
 
@@ -506,6 +508,9 @@ func BuildMarkdownFile(sub config.MultiAgentSubConfig) ([]byte, error) {
 	}
 	if k := strings.TrimSpace(sub.Kind); k != "" {
 		fm.Kind = k
+	}
+	if t := strings.TrimSpace(sub.ModelTier); t != "" {
+		fm.ModelTier = t
 	}
 	if len(sub.RoleTools) > 0 {
 		fm.Tools = sub.RoleTools

@@ -277,7 +277,6 @@ description: |
   - 查询结果数量受账户权限限制
   - full参数需要高级权限
 parameters:
-
   - name: "query"
     type: "string"
     description: |

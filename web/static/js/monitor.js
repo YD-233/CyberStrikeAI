@@ -1692,11 +1692,11 @@ function handleStreamEvent(event, progressElement, progressId,
                 // 更新任务状态
                 updateProgressConversation(progressId, event.data.conversationId);
                 
-                // 如果用户已经开始了新对话（currentConversationId 为 null），
-                // 且这个 conversation 事件来自旧对话，就不更新 currentConversationId
-                if (currentConversationId === null && originalConversationId !== null) {
-                    // 用户已经开始了新对话，忽略旧对话的 conversation 事件
-                    // 但仍然更新任务状态，以便正确显示任务信息
+                // 如果当前已锁定某个对话（currentConversationId 非 null），
+                // 而这个事件来自另一个（旧/后台）对话，则不要用旧对话ID覆盖当前对话。
+                // 仅在 ID 匹配，或 currentConversationId 为 null（初次引导，由流来分配ID）时才接受。
+                if (currentConversationId !== null && event.data.conversationId !== currentConversationId) {
+                    // 来自其他对话的事件：仅更新任务状态，不影响当前活动UI
                     break;
                 }
                 
@@ -1917,7 +1917,7 @@ function handleStreamEvent(event, progressElement, progressId,
             renderInlineHitlApproval(hitlItemId, event.data || {});
             try {
                 window.dispatchEvent(new CustomEvent('hitl-interrupt', { detail: event.data || {} }));
-            } catch (e) {}
+            } catch (e) { console.error('hitl-interrupt dispatch failed', e); }
             break;
         case 'hitl_resumed':
             addTimelineItem(timeline, 'progress', {
@@ -2290,8 +2290,9 @@ function handleStreamEvent(event, progressElement, progressId,
             setMcpIds(mergeMcpExecutionIDLists(typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], mcpIds));
 
             if (responseData.conversationId) {
-                // 如果用户已经开始了新对话（currentConversationId 为 null），且这个事件来自旧对话，则忽略
-                if (currentConversationId === null && responseOriginalConversationId !== null) {
+                // 仅当事件归属于当前对话（或 currentConversationId 为 null 的初次引导）时才更新活动UI；
+                // 来自其他（旧/后台）对话的事件不得覆盖当前对话ID。
+                if (currentConversationId !== null && responseData.conversationId !== currentConversationId) {
                     updateProgressConversation(progressId, responseData.conversationId);
                     break;
                 }
@@ -2341,7 +2342,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const responseOriginalConversationId = responseTaskState?.conversationId;
 
             if (responseData.conversationId) {
-                if (currentConversationId === null && responseOriginalConversationId !== null) {
+                if (currentConversationId !== null && responseData.conversationId !== currentConversationId) {
                     updateProgressConversation(progressId, responseData.conversationId);
                     break;
                 }
@@ -2393,7 +2394,7 @@ function handleStreamEvent(event, progressElement, progressId,
 
             // 更新对话ID
             if (responseData.conversationId) {
-                if (currentConversationId === null && responseOriginalConversationId !== null) {
+                if (currentConversationId !== null && responseData.conversationId !== currentConversationId) {
                     updateProgressConversation(progressId, responseData.conversationId);
                     break;
                 }
@@ -2517,6 +2518,45 @@ function handleStreamEvent(event, progressElement, progressId,
             mainIterationStateByProgressId.delete(String(progressId));
             break;
             
+        case 'ooda_phase': {
+            // Cairn 黑板编排阶段切换（bootstrap / reason / explore / synthesize）。
+            const d = event.data || {};
+            if (window.BlackboardPanel && typeof window.BlackboardPanel.handleBoardEvent === 'function') {
+                try {
+                    window.BlackboardPanel.handleBoardEvent('ooda_phase', d);
+                    window.BlackboardPanel.showToggle(true);
+                    // 运行开始（bootstrap）时自动展开一次黑板面板。
+                    if (String(d.phase || '').toLowerCase() === 'bootstrap') {
+                        window.BlackboardPanel.open();
+                    }
+                } catch (e) { console.error('blackboard ooda_phase dispatch failed', e); }
+            }
+            const phaseGlyphMap = { bootstrap: '🚀', reason: '🧠', explore: '🔍', synthesize: '📋' };
+            const g = phaseGlyphMap[String(d.phase || '').toLowerCase()] || '🗺️';
+            addTimelineItem(timeline, 'iteration', {
+                title: g + ' ' + (typeof window.t === 'function' ? window.t('chat.bbPhaseTimeline') : '黑板阶段') + (event.message ? '：' + event.message : ''),
+                message: '',
+                data: d
+            });
+            break;
+        }
+
+        case 'fact_added':
+        case 'intent_added':
+        case 'intent_claimed':
+        case 'intent_done':
+        case 'intent_dropped':
+        case 'hint_added': {
+            // 黑板增量事件：转发给实时面板（无 default 分支，原本会静默穿透）。
+            if (window.BlackboardPanel && typeof window.BlackboardPanel.handleBoardEvent === 'function') {
+                try {
+                    window.BlackboardPanel.handleBoardEvent(event.type, event.data || {});
+                    window.BlackboardPanel.showToggle(true);
+                } catch (e) { console.error('blackboard event dispatch failed', e); }
+            }
+            break;
+        }
+
         case 'done':
             // 清理流式输出状态
             responseStreamStateByProgressId.delete(progressId);
@@ -2540,11 +2580,16 @@ function handleStreamEvent(event, progressElement, progressId,
             }
             // 更新对话ID
             if (event.data && event.data.conversationId) {
-                currentConversationId = event.data.conversationId;
-                syncAgentLiveStreamConversationId(event.data.conversationId);
-                updateActiveConversation();
-                addAttackChainButton(currentConversationId);
-                updateProgressConversation(progressId, event.data.conversationId);
+                // 来自其他（旧/后台）对话的 done 事件不得覆盖当前对话ID
+                if (currentConversationId !== null && event.data.conversationId !== currentConversationId) {
+                    updateProgressConversation(progressId, event.data.conversationId);
+                } else {
+                    currentConversationId = event.data.conversationId;
+                    syncAgentLiveStreamConversationId(event.data.conversationId);
+                    updateActiveConversation();
+                    addAttackChainButton(currentConversationId);
+                    updateProgressConversation(progressId, event.data.conversationId);
+                }
             }
             if (progressTaskState.has(progressId)) {
                 finalizeProgressTask(progressId, typeof window.t === 'function' ? window.t('tasks.statusCompleted') : '已完成');

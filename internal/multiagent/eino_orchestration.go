@@ -287,8 +287,8 @@ func capPlanExecuteUserInputMessages(input []adk.Message, appCfg *config.Config,
 	maxTotal := 120000
 	modelName := "gpt-4o"
 	if appCfg != nil {
-		if appCfg.OpenAI.MaxTotalTokens > 0 {
-			maxTotal = appCfg.OpenAI.MaxTotalTokens
+		if v := appCfg.OpenAI.MaxTotalTokensEffective(); v > 0 {
+			maxTotal = v
 		}
 		if m := strings.TrimSpace(appCfg.OpenAI.Model); m != "" {
 			modelName = m
@@ -341,8 +341,8 @@ func renderPlanExecuteStepsByBudget(steps []planexecute.ExecutedStep, appCfg *co
 	maxTotal := 120000
 	modelName := "gpt-4o"
 	if appCfg != nil {
-		if appCfg.OpenAI.MaxTotalTokens > 0 {
-			maxTotal = appCfg.OpenAI.MaxTotalTokens
+		if v := appCfg.OpenAI.MaxTotalTokensEffective(); v > 0 {
+			maxTotal = v
 		}
 		if m := strings.TrimSpace(appCfg.OpenAI.Model); m != "" {
 			modelName = m

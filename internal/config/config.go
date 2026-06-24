@@ -20,6 +20,7 @@ type Config struct {
 	Log         LogConfig             `yaml:"log"`
 	MCP         MCPConfig             `yaml:"mcp"`
 	OpenAI      OpenAIConfig          `yaml:"openai"`
+	Models      ModelsConfig          `yaml:"models,omitempty" json:"models,omitempty"` // 双模型分层路由（high/low）；缺省时等价于 openai 单模型
 	FOFA        FofaConfig            `yaml:"fofa,omitempty" json:"fofa,omitempty"`
 	Agent       AgentConfig           `yaml:"agent"`
 	Hitl        HitlConfig            `yaml:"hitl,omitempty" json:"hitl,omitempty"`
@@ -386,6 +387,8 @@ type MultiAgentSubConfig struct {
 	RoleTools     []string `yaml:"role_tools" json:"role_tools"`                   // 与单 Agent 角色工具相同 key；空表示全部工具（bind_role 可补全 tools）
 	MaxIterations int      `yaml:"max_iterations" json:"max_iterations"`
 	Kind          string   `yaml:"kind,omitempty" json:"kind,omitempty"` // 仅 Markdown：kind=orchestrator 表示 Deep 主代理（与 orchestrator.md 二选一约定）
+	// ModelTier 指定该子代理使用的模型档位（high|low）；空表示按默认策略（子代理走 low）。
+	ModelTier string `yaml:"model_tier,omitempty" json:"model_tier,omitempty"`
 }
 
 // MultiAgentPublic 返回给前端的精简信息（不含子代理指令全文）。
@@ -430,6 +433,8 @@ func NormalizeMultiAgentOrchestration(s string) string {
 		return "plan_execute"
 	case "supervisor", "super", "sv":
 		return "supervisor"
+	case "blackboard", "cairn", "ooda", "bb":
+		return "blackboard"
 	default:
 		return "deep"
 	}
@@ -538,9 +543,120 @@ type OpenAIConfig struct {
 	APIKey         string `yaml:"api_key" json:"api_key"`
 	BaseURL        string `yaml:"base_url" json:"base_url"`
 	Model          string `yaml:"model" json:"model"`
-	MaxTotalTokens int    `yaml:"max_total_tokens,omitempty" json:"max_total_tokens,omitempty"`
+	// MaxTotalTokens 上下文 token 预算。0 或留空 = 按模型名自动推断窗口（见 inferModelContextWindow）；
+	// 填正数 = 手动覆盖。内存压缩触发、reduction 清除、攻击链构建共用此值。
+	MaxTotalTokens int `yaml:"max_total_tokens,omitempty" json:"max_total_tokens,omitempty"`
 	// Reasoning 控制 Eino ChatModel 的 thinking / reasoning_effort / output_config 等（Eino 单/多代理路径生效）。
 	Reasoning OpenAIReasoningConfig `yaml:"reasoning,omitempty" json:"reasoning,omitempty"`
+}
+
+// MaxTotalTokensEffective 返回该模型的有效上下文窗口（token）。
+// 优先用显式配置的 max_total_tokens；未配置时按模型名推断一个保守默认值，
+// 避免压缩/清除阈值用一个对小窗口模型（如 deepseek-chat 64k）过大的固定值，
+// 导致请求在 summarization 触发前就被网关 400。
+// 这是 attackchain/builder.go 里那段推断的统一、可复用版本。
+func (c OpenAIConfig) MaxTotalTokensEffective() int {
+	if c.MaxTotalTokens > 0 {
+		return c.MaxTotalTokens
+	}
+	return inferModelContextWindow(c.Model)
+}
+
+// inferModelContextWindow 按模型名推断上下文窗口（token）。
+// 当前一代旗舰模型普遍 1M 起（部分到 2M）；老变体仍保守取小值，避免给小窗口模型填大值反而超窗 400。
+// 版本感知：同一家族里新版本（gpt-5 / claude-4.x / qwen3 / deepseek-v4 / glm-5 / grok-4）走大窗口，
+// 老版本（gpt-4 / claude-3 / qwen2.5 / deepseek-chat(V3) / glm-4）回退到各自的历史窗口。
+// 未知模型保守取 128k（现代模型最低档），既不易超窗也不过度压缩。
+func inferModelContextWindow(model string) int {
+	const (
+		k16  = 16000
+		k32  = 32000
+		k128 = 128000
+		k200 = 200000
+		k256 = 256000
+		k400 = 400000
+		m1   = 1000000
+		m2   = 2000000
+	)
+	m := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case m == "":
+		return k128
+
+	// ---- OpenAI ----
+	case strings.Contains(m, "gpt-3.5"):
+		return k16
+	case strings.Contains(m, "gpt-5"):
+		if strings.Contains(m, "mini") || strings.Contains(m, "nano") {
+			return k400 // GPT-5.4-mini 标称 400K
+		}
+		return m1 // GPT-5.5 / 5.4 标称 1M
+	case strings.Contains(m, "o1"), strings.Contains(m, "o3"), strings.Contains(m, "o4"):
+		return k200 // o 系列推理模型
+	case strings.Contains(m, "gpt-4o"), strings.Contains(m, "gpt-4.1"), strings.Contains(m, "gpt-4-turbo"):
+		return k128
+	case strings.Contains(m, "gpt-4-32k"):
+		return k32
+	case strings.Contains(m, "gpt-4"):
+		return k32 // 经典 gpt-4，保守
+
+	// ---- Anthropic Claude（4.x 起 1M；claude-2/3 为 200k）----
+	case strings.Contains(m, "claude"):
+		if strings.Contains(m, "claude-2") || strings.Contains(m, "claude-3") {
+			return k200
+		}
+		return m1 // Opus/Sonnet 4.x 标称 1M
+
+	// ---- Google Gemini（2.5 / 3.x 普遍 1M）----
+	case strings.Contains(m, "gemini"):
+		return m1
+
+	// ---- xAI Grok（grok-4 标称 2M；grok-4.x / grok-3 为 1M）----
+	case strings.Contains(m, "grok"):
+		if strings.Contains(m, "grok-4.") { // grok-4.3 等
+			return m1
+		}
+		if strings.Contains(m, "grok-4") {
+			return m2
+		}
+		return m1
+
+	// ---- DeepSeek（V4 起 1M；deepseek-chat / reasoner(V3) 为 64k）----
+	case strings.Contains(m, "deepseek"):
+		if strings.Contains(m, "v4") {
+			return m1
+		}
+		return 64000
+
+	// ---- 阿里 Qwen（3.x 1M；qwen2.5 等老版本 128k）----
+	case strings.Contains(m, "qwen"), strings.Contains(m, "qwq"):
+		if strings.Contains(m, "qwen3") || strings.Contains(m, "qwen-3") {
+			return m1
+		}
+		return k128
+
+	// ---- 月之暗面 Kimi（K2.x 256k）----
+	case strings.Contains(m, "kimi"), strings.Contains(m, "moonshot"):
+		return k256
+
+	// ---- 智谱 GLM（5.x 1M；老版本 128k）----
+	case strings.Contains(m, "glm"):
+		if strings.Contains(m, "glm-5") || strings.Contains(m, "glm5") {
+			return m1
+		}
+		return k128
+
+	// ---- MiniMax（M3 1M）----
+	case strings.Contains(m, "minimax"):
+		return m1
+
+	// ---- 小米 MiMo（V2.x 1M）----
+	case strings.Contains(m, "mimo"):
+		return m1
+
+	default:
+		return k128
+	}
 }
 
 // OpenAIReasoningConfig 全局默认与网关 profile（对话页可通过 ChatRequest.reasoning 覆盖，受 AllowClientReasoning 约束）。
@@ -1249,7 +1365,7 @@ func Default() *Config {
 		OpenAI: OpenAIConfig{
 			BaseURL:        "https://api.openai.com/v1",
 			Model:          "gpt-4",
-			MaxTotalTokens: 120000,
+			MaxTotalTokens: 0, // 0 = 按模型名自动推断上下文窗口（见 inferModelContextWindow）
 		},
 		Agent: AgentConfig{
 			MaxIterations:      30, // 默认最大迭代次数

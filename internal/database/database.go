@@ -369,6 +369,40 @@ func (db *DB) initTables() error {
 		UNIQUE(project_id, source_fact_key, target_fact_key, edge_type)
 	);`
 
+	// 黑板意图（Cairn Intent）：声明但尚未执行的探索方向。
+	// status: open（待认领）| claimed（已认领）| done（已完成，产出 result_fact_key）| dropped（放弃）。
+	createProjectIntentsTable := `
+	CREATE TABLE IF NOT EXISTS project_intents (
+		id TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL,
+		conversation_id TEXT,
+		title TEXT NOT NULL DEFAULT '',
+		body TEXT,
+		status TEXT NOT NULL DEFAULT 'open',
+		priority INTEGER NOT NULL DEFAULT 0,
+		claimed_by TEXT,
+		parent_fact_key TEXT,
+		result_fact_key TEXT,
+		result_summary TEXT,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+	);`
+
+	// 黑板提示（Cairn Hint）：人类随时注入的判断，worker 在下一次读板时吸收。
+	// status: active（生效中，参与读板）| archived（已归档）。
+	createProjectHintsTable := `
+	CREATE TABLE IF NOT EXISTS project_hints (
+		id TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL,
+		conversation_id TEXT,
+		content TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'active',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+	);`
+
 	// 创建漏洞表
 	createVulnerabilitiesTable := `
 	CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -610,6 +644,11 @@ func (db *DB) initTables() error {
 	CREATE INDEX IF NOT EXISTS idx_project_fact_edges_project ON project_fact_edges(project_id);
 	CREATE INDEX IF NOT EXISTS idx_project_fact_edges_source ON project_fact_edges(project_id, source_fact_key);
 	CREATE INDEX IF NOT EXISTS idx_project_fact_edges_target ON project_fact_edges(project_id, target_fact_key);
+	CREATE INDEX IF NOT EXISTS idx_project_intents_project ON project_intents(project_id);
+	CREATE INDEX IF NOT EXISTS idx_project_intents_status ON project_intents(project_id, status);
+	CREATE INDEX IF NOT EXISTS idx_project_intents_conversation ON project_intents(conversation_id);
+	CREATE INDEX IF NOT EXISTS idx_project_hints_project ON project_hints(project_id, status);
+	CREATE INDEX IF NOT EXISTS idx_project_hints_conversation ON project_hints(conversation_id);
 	CREATE INDEX IF NOT EXISTS idx_conversations_project_id ON conversations(project_id);
 	CREATE INDEX IF NOT EXISTS idx_vulnerabilities_project_id ON vulnerabilities(project_id);
 	CREATE INDEX IF NOT EXISTS idx_batch_tasks_queue_id ON batch_tasks(queue_id);
@@ -693,6 +732,14 @@ func (db *DB) initTables() error {
 
 	if _, err := db.Exec(createProjectFactEdgesTable); err != nil {
 		return fmt.Errorf("创建project_fact_edges表失败: %w", err)
+	}
+
+	if _, err := db.Exec(createProjectIntentsTable); err != nil {
+		return fmt.Errorf("创建project_intents表失败: %w", err)
+	}
+
+	if _, err := db.Exec(createProjectHintsTable); err != nil {
+		return fmt.Errorf("创建project_hints表失败: %w", err)
 	}
 
 	if _, err := db.Exec(createVulnerabilitiesTable); err != nil {
